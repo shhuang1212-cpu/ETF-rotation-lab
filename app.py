@@ -1,3 +1,4 @@
+import textwrap
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -8,47 +9,54 @@ import numpy as np
 
 st.set_page_config(page_title="ETF 持股輪動 LAB", page_icon="📊", layout="wide")
 
+def render_html(html_str: str):
+    st.markdown(textwrap.dedent(html_str).strip(), unsafe_allow_html=True)
+
 # 高對比儀表板樣式（手機淺色/深色模式皆清楚可讀）
-st.markdown("""
+render_html("""
 <style>
     .block-container { padding-top: 1.2rem; padding-bottom: 3rem; max-width: 1120px; }
     .lab-header {
         display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
-        margin-bottom: 1rem;
+        margin-bottom: 0.5rem;
     }
-    .lab-title { font-size: 1.65rem; font-weight: 800; letter-spacing: -0.5px; }
-    .lab-sub { font-size: 1rem; opacity: 0.75; border-left: 2px solid #94A3B8; padding-left: 10px; }
+    .lab-title { font-size: 1.55rem; font-weight: 800; letter-spacing: -0.5px; color: #F8FAFC; }
+    .lab-sub { font-size: 0.95rem; color: #CBD5E1; border-left: 2px solid #64748B; padding-left: 10px; }
     .lab-badge {
         font-size: 0.78rem; font-weight: 700; padding: 2px 8px;
-        border-radius: 6px; border: 1px solid #64748B; opacity: 0.85;
+        border-radius: 6px; border: 1px solid #64748B; color: #E2E8F0; background: #1E293B;
     }
     .pool-card {
         background-color: #111827;
         color: #F8FAFC;
         border: 1px solid #334155;
         border-radius: 14px;
-        padding: 16px 16px 14px 16px;
+        padding: 16px 15px 14px 15px;
         margin-bottom: 12px;
     }
     .pool-name {
-        text-align: center; font-size: 1.15rem; font-weight: 700;
-        color: #F1F5F9; margin-bottom: 6px;
+        text-align: center; font-size: 1.12rem; font-weight: 700;
+        color: #F8FAFC; margin-bottom: 4px;
     }
     .pool-sub {
-        text-align: center; font-size: 0.78rem; color: #94A3B8; margin-bottom: 8px;
+        text-align: center; font-size: 0.78rem; color: #CBD5E1; margin-bottom: 8px;
+        min-height: 2.2em;
     }
-    .stat-row {
+    .stat-line {
         display: flex; justify-content: space-between; align-items: center;
-        font-size: 0.92rem; margin: 5px 0; color: #E2E8F0;
+        font-size: 0.92rem; margin: 6px 0; color: #E2E8F0;
     }
     .stat-val { font-weight: 700; color: #FFFFFF; }
+    .extra-line {
+        font-size: 0.78rem; color: #CBD5E1; margin-top: 6px; line-height: 1.35;
+    }
     .pp-pos { color: #4ADE80; font-weight: 700; }
     .pp-neg { color: #F87171; font-weight: 700; }
-    .pp-zero { color: #94A3B8; font-weight: 700; }
+    .pp-zero { color: #CBD5E1; font-weight: 700; }
     .z-block { margin-top: 10px; padding-top: 8px; border-top: 1px solid #1E293B; }
     .z-row {
         display: flex; align-items: center; justify-content: space-between;
-        gap: 8px; font-size: 0.85rem; margin: 6px 0; color: #CBD5E1;
+        gap: 6px; font-size: 0.84rem; margin: 6px 0; color: #E2E8F0;
     }
     .z-track {
         position: relative; flex: 1; height: 6px; background: #334155;
@@ -67,14 +75,14 @@ st.markdown("""
         display: flex; flex-wrap: wrap; justify-content: space-around; align-items: center;
         background-color: #111827; color: #F8FAFC;
         border: 1px solid #334155; border-radius: 14px;
-        padding: 14px 18px; margin-top: 10px; gap: 12px;
+        padding: 14px 18px; margin-top: 8px; gap: 12px;
     }
     .sum-item { font-size: 1.05rem; font-weight: 700; color: #E2E8F0; }
     .sum-trim { color: #F87171; font-size: 1.25rem; font-weight: 800; }
     .sum-add  { color: #4ADE80; font-size: 1.25rem; font-weight: 800; }
-    .sum-cash { color: #F8FAFC; font-size: 1.25rem; font-weight: 800; }
+    .sum-cash { color: #FFFFFF; font-size: 1.25rem; font-weight: 800; }
 </style>
-""", unsafe_allow_html=True)
+""")
 
 # 鎖定最佳化配置：45% 台股 / 45% 美股 / 10% 費半
 POOL_TARGET = {"TW": 0.45, "US": 0.45, "SEMI": 0.10}
@@ -151,22 +159,19 @@ def get_target_2x_ratio(score, z_20w):
 
 def gauge_svg(pct_0_to_100, color="#34D399"):
     pct = max(0.0, min(100.0, pct_0_to_100))
-    # 半圓弧長度約 157（半徑 50，pi * 50 = 157.08）
     arc_len = 157.08
     dash = (pct / 100.0) * arc_len
-    return f"""
-    <svg viewBox="0 0 140 78" style="width:100%;max-height:92px;display:block;margin:0 auto;">
-        <path d="M 20 68 A 50 50 0 0 1 120 68" fill="none" stroke="#334155" stroke-width="11" stroke-linecap="round"/>
-        <path d="M 20 68 A 50 50 0 0 1 120 68" fill="none" stroke="{color}" stroke-width="11" stroke-linecap="round"
-              stroke-dasharray="{dash:.1f} {arc_len:.1f}"/>
-        <text x="70" y="54" text-anchor="middle" fill="#FFFFFF" font-size="22" font-weight="800">{pct:.1f}%</text>
-        <text x="20" y="76" text-anchor="middle" fill="#94A3B8" font-size="9">0%</text>
-        <text x="120" y="76" text-anchor="middle" fill="#94A3B8" font-size="9">100%</text>
-    </svg>
-    """
+    return (
+        f'<svg viewBox="0 0 140 78" style="width:100%;max-height:90px;display:block;margin:0 auto;">'
+        f'<path d="M 20 68 A 50 50 0 0 1 120 68" fill="none" stroke="#334155" stroke-width="11" stroke-linecap="round"/>'
+        f'<path d="M 20 68 A 50 50 0 0 1 120 68" fill="none" stroke="{color}" stroke-width="11" stroke-linecap="round" stroke-dasharray="{dash:.1f} {arc_len:.1f}"/>'
+        f'<text x="70" y="54" text-anchor="middle" fill="#FFFFFF" font-size="22" font-weight="800">{pct:.1f}%</text>'
+        f'<text x="20" y="76" text-anchor="middle" fill="#94A3B8" font-size="9">0%</text>'
+        f'<text x="120" y="76" text-anchor="middle" fill="#94A3B8" font-size="9">100%</text>'
+        f'</svg>'
+    )
 
 def z_slider_html(label, z_val):
-    # 將 -3σ ~ +3σ 映射到 0% ~ 100%
     pos = max(0.0, min(100.0, (z_val + 3.0) / 6.0 * 100.0))
     if z_val >= 1.5:
         c, z_cls = "#F87171", "pp-neg"
@@ -176,18 +181,15 @@ def z_slider_html(label, z_val):
         c, z_cls = "#60A5FA", "pp-pos"
     else:
         c, z_cls = "#FBBF24", "pp-zero"
-    return f"""
-    <div class="z-row">
-        <span style="min-width:38px;">{label}</span>
-        <span style="font-size:0.75rem;color:#94A3B8;">-3σ</span>
-        <div class="z-track">
-            <div class="z-center"></div>
-            <div class="z-dot" style="left:{pos:.1f}%;background:{c};"></div>
-        </div>
-        <span style="font-size:0.75rem;color:#94A3B8;">+3σ</span>
-        <span class="{z_cls}" style="min-width:52px;text-align:right;">{z_val:+.2f}σ</span>
-    </div>
-    """
+    return (
+        f'<div class="z-row">'
+        f'<span style="min-width:38px;">{label}</span>'
+        f'<span style="font-size:0.74rem;color:#94A3B8;">-3σ</span>'
+        f'<div class="z-track"><div class="z-center"></div><div class="z-dot" style="left:{pos:.1f}%;background:{c};"></div></div>'
+        f'<span style="font-size:0.74rem;color:#94A3B8;">+3σ</span>'
+        f'<span class="{z_cls}" style="min-width:52px;text-align:right;">{z_val:+.2f}σ</span>'
+        f'</div>'
+    )
 
 def fmt_pp(diff_pp):
     if abs(diff_pp) < 0.05:
@@ -199,13 +201,13 @@ def fmt_pp(diff_pp):
 # ================= 頂部標題列 =================
 col_t, col_b = st.columns([4, 1])
 with col_t:
-    st.markdown("""
+    render_html("""
     <div class="lab-header">
         <span class="lab-title">ETF 持股輪動 LAB</span>
         <span class="lab-sub">20 週／20 月位階</span>
         <span class="lab-badge">45 / 45 / 10 積極檔</span>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 with col_b:
     if st.button("🔄 更新報價", use_container_width=True):
         st.cache_data.clear()
@@ -250,11 +252,12 @@ semi_sug_pct = POOL_TARGET["SEMI"] * 100.0
 tw_2x_target, tw_status = get_target_2x_ratio(data["TW"]["score"], data["TW"]["z_20w"])
 us_2x_target, us_status = get_target_2x_ratio(data["US"]["score"], data["US"]["z_20w"])
 
-total_exp = (tw_v1 + us_v1 + se_v1) + 2.0 * (tw_v2 + us_2x_target * 0) + 2.0 * (tw_v2 + us_v2)
+# 總曝險（原型市值 + 正二市值 * 2）÷ 扣除外部借款後淨資產（正二市值按實際市值計入淨資產）
+total_exp = (tw_v1 + us_v1 + se_v1) + 2.0 * (tw_v2 + us_v2)
 net_asset = max(1.0, grand_tot - ext_debt)
 real_lev  = total_exp / net_asset
 
-# ================= 四張儀表板卡片（台股 / 美股 / 費半 / 總覽與槓桿） =================
+# ================= 四張儀表板卡片 =================
 cards = [
     {
         "title": "台股核心池",
@@ -293,28 +296,29 @@ cards = [
 cols = st.columns(4)
 for idx, c in enumerate(cards):
     diff_pp = c["sug"] - c["cur"]
-    html = f"""
-    <div class="pool-card">
-        <div class="pool-name">{c["title"]}</div>
-        <div class="pool-sub">{c["sub"]}</div>
-        {gauge_svg(c["cur"], c["color"])}
-        <div class="stat-row"><span>目前持有</span><span class="stat-val">{c["cur"]:.1f}%</span></div>
-        <div class="stat-row"><span>建議配置</span><span><strong class="stat-val">{c["sug"]:.1f}%</strong> &nbsp; {fmt_pp(diff_pp)}</span></div>
-        <div class="stat-row" style="font-size:0.78rem;color:#94A3B8;"><span>{c["extra"]}</span></div>
-        <div class="z-block">
-            {z_slider_html("20 週", c["zw"])}
-            {z_slider_html("20 月", c["zm"])}
-        </div>
-    </div>
-    """
-    cols[idx].markdown(html, unsafe_allow_html=True)
+    card_html = (
+        f'<div class="pool-card">'
+        f'<div class="pool-name">{c["title"]}</div>'
+        f'<div class="pool-sub">{c["sub"]}</div>'
+        f'{gauge_svg(c["cur"], c["color"])}'
+        f'<div class="stat-line"><span>目前持有</span><span class="stat-val">{c["cur"]:.1f}%</span></div>'
+        f'<div class="stat-line"><span>建議配置</span><span><strong class="stat-val">{c["sug"]:.1f}%</strong> &nbsp;{fmt_pp(diff_pp)}</span></div>'
+        f'<div class="extra-line">{c["extra"]}</div>'
+        f'<div class="z-block">'
+        f'{z_slider_html("20 週", c["zw"])}'
+        f'{z_slider_html("20 月", c["zm"])}'
+        f'</div>'
+        f'</div>'
+    )
+    with cols[idx]:
+        render_html(card_html)
 
 # ================= 底部摘要列（減碼 pp / 加碼 pp / 現金 %） =================
 diffs = [tw_sug_pct - tw_cur_pct, us_sug_pct - us_cur_pct, semi_sug_pct - semi_cur_pct]
 add_pp  = sum(max(0.0, d) for d in diffs)
 trim_pp = sum(max(0.0, -d) for d in diffs)
 
-st.markdown(f"""
+render_html(f"""
 <div class="summary-bar">
     <div class="sum-item">減碼 <span class="sum-trim">{trim_pp:.1f} pp</span></div>
     <div class="sum-item">|</div>
@@ -322,11 +326,11 @@ st.markdown(f"""
     <div class="sum-item">|</div>
     <div class="sum-item">現金 <span class="sum-cash">{cash_pct:.1f}%</span></div>
 </div>
-""", unsafe_allow_html=True)
+""")
 
 # ================= 精確買賣股數執行清單 =================
 with st.expander("📋 查看精確買賣股數建議（偏離 >10% 觸發再平衡）", expanded=True):
-    def _pool_action(name, s1, p1, v1, s2, p2, v2, t2x, score, zw):
+    def _pool_action(name, s1, p1, v1, s2, p2, v2, t2x):
         ptot = v1 + v2
         cur2 = (v2 / ptot) if ptot > 0 else 0.0
         dev = abs(cur2 - t2x)
@@ -339,8 +343,8 @@ with st.expander("📋 查看精確買賣股數建議（偏離 >10% 觸發再平
         else:
             st.success(f"✅ **{name}（偏離 {dev*100:.1f}% ≤ 10%）**：維持現狀不需換股")
 
-    _pool_action("台股核心池 (0050/00631L)", s_0050, tw_p1, tw_v1, s_631, tw_p2, tw_v2, tw_2x_target, data["TW"]["score"], data["TW"]["z_20w"])
-    _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670, us_p2, us_v2, us_2x_target, data["US"]["score"], data["US"]["z_20w"])
+    _pool_action("台股核心池 (0050/00631L)", s_0050, tw_p1, tw_v1, s_631, tw_p2, tw_v2, tw_2x_target)
+    _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670, us_p2, us_v2, us_2x_target)
     st.info(f"⚡ **費半衛星池 (00830)**：現價 {se_p1:.2f}，目前占比 {semi_cur_pct:.1f}%（目標 {semi_sug_pct:.1f}%），綜合積分 S = {data['SEMI']['score']:+.2f}")
 
 st.caption("🛡️ 紀律提醒：條件觸發照表操課、不猜低點；調整完畢即可安心蓋牌過生活，並確保緊急預備金與投資資金獨立切分。")
