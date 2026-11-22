@@ -93,15 +93,33 @@ render_html("""
         border: 1.5px solid #0F172A;
     }
     .summary-bar {
-        display: flex; flex-wrap: wrap; justify-content: space-around; align-items: center;
+        display: flex; flex-direction: column; align-items: stretch;
         background-color: #111827; color: #F8FAFC;
         border: 1px solid #334155; border-radius: 14px;
-        padding: 14px 18px; margin-top: 8px; gap: 12px;
+        padding: 15px 18px; margin-top: 8px; gap: 10px;
     }
-    .sum-item { font-size: 1.05rem; font-weight: 700; color: #E2E8F0; }
-    .sum-trim { color: #F87171; font-size: 1.25rem; font-weight: 800; }
-    .sum-add  { color: #4ADE80; font-size: 1.25rem; font-weight: 800; }
-    .sum-cash { color: #FFFFFF; font-size: 1.25rem; font-weight: 800; }
+    .sum-top {
+        display: flex; flex-wrap: wrap; justify-content: space-around;
+        align-items: center; gap: 12px;
+    }
+    .sum-item { font-size: 1.02rem; font-weight: 700; color: #E2E8F0; }
+    .sum-trim { color: #F87171; font-size: 1.22rem; font-weight: 800; }
+    .sum-add  { color: #4ADE80; font-size: 1.22rem; font-weight: 800; }
+    .sum-cash { color: #FFFFFF; font-size: 1.22rem; font-weight: 800; }
+    .trigger-banner-on {
+        background: rgba(239, 68, 68, 0.14); border: 1px solid #EF4444;
+        color: #FECACA; padding: 9px 12px; border-radius: 10px;
+        font-size: 0.90rem; font-weight: 700;
+    }
+    .trigger-banner-off {
+        background: rgba(34, 197, 94, 0.12); border: 1px solid #22C55E;
+        color: #BBF7D0; padding: 9px 12px; border-radius: 10px;
+        font-size: 0.90rem; font-weight: 700;
+    }
+    .guide-box {
+        font-size: 0.84rem; color: #CBD5E1; border-top: 1px solid #1E293B;
+        padding-top: 9px; line-height: 1.6;
+    }
 </style>
 """)
 
@@ -324,7 +342,6 @@ tot_2x_val = tw_v2 + us_v2
 all_c1_pct = (tot_1x_val / grand_tot * 100.0) if grand_tot > 0 else 0.0
 all_c2_pct = (tot_2x_val / grand_tot * 100.0) if grand_tot > 0 else 0.0
 
-# 目標全組合原型 vs. 2x 比例（依三大池目標與正二目標權重推算）
 all_t2_pct = (POOL_TARGET["TW"] * tw_2x_target + POOL_TARGET["US"] * us_2x_target) * 100.0
 all_t1_pct = max(0.0, 100.0 - cash_pct - all_t2_pct)
 
@@ -405,18 +422,64 @@ for idx, c in enumerate(cards):
     with cols[idx]:
         render_html(card_html)
 
-# ================= 底部摘要列（減碼 pp / 加碼 pp / 現金 %） =================
+# ================= 底部白話摘要列 ＋ 自動判斷「何時真正觸發調整」 =================
 diffs = [tw_sug_pct - tw_cur_pct, us_sug_pct - us_cur_pct, semi_sug_pct - semi_cur_pct]
 add_pp  = sum(max(0.0, d) for d in diffs)
 trim_pp = sum(max(0.0, -d) for d in diffs)
 
+pool_map = [
+    ("台股核心池", tw_cur_pct, tw_sug_pct),
+    ("美股核心池", us_cur_pct, us_sug_pct),
+    ("費半衛星池", semi_cur_pct, semi_sug_pct),
+]
+over_pools  = [f"{n}（超標 {c - s:.1f}%）" for n, c, s in pool_map if c - s > 0.5]
+under_pools = [f"{n}（落後 {s - c:.1f}%）" for n, c, s in pool_map if s - c > 0.5]
+over_text   = "、".join(over_pools) if over_pools else "目前無明顯超標池"
+under_text  = "、".join(under_pools) if under_pools else "目前無明顯落後池"
+
+# 檢查兩大觸發調整條件（偏離 > 10% 才算真正觸發）
+triggered_reasons = []
+if abs(tw_c2_in - tw_t2_in) > 10.0 and (tw_v1 + tw_v2) > 0:
+    triggered_reasons.append(f"台股池正二偏離 {abs(tw_c2_in - tw_t2_in):.1f}%（>10%）")
+if abs(us_c2_in - us_t2_in) > 10.0 and (us_v1 + us_v2) > 0:
+    triggered_reasons.append(f"美股池正二偏離 {abs(us_c2_in - us_t2_in):.1f}%（>10%）")
+for n, c, s in pool_map:
+    if abs(c - s) > 10.0 and invest_tot > 0:
+        triggered_reasons.append(f"{n}整體占比偏離 {abs(c - s):.1f}%（>10%）")
+
+if triggered_reasons:
+    status_banner = (
+        f'<div class="trigger-banner-on">'
+        f'🔔 【今日狀態：已觸發調整條件】{" ｜ ".join(triggered_reasons)} → 請依下方股數清單執行再平衡。'
+        f'</div>'
+    )
+else:
+    status_banner = (
+        f'<div class="trigger-banner-off">'
+        f'🟢 【今日狀態：未觸發調整條件】所有池內正二與整體占比偏離皆在 10% 容許範圍內 → 不需換股，安心蓋牌過生活！'
+        f'</div>'
+    )
+
 render_html(f"""
 <div class="summary-bar">
-    <div class="sum-item">減碼 <span class="sum-trim">{trim_pp:.1f} pp</span></div>
-    <div class="sum-item">|</div>
-    <div class="sum-item">加碼 <span class="sum-add">{add_pp:.1f} pp</span></div>
-    <div class="sum-item">|</div>
-    <div class="sum-item">現金 <span class="sum-cash">{cash_pct:.1f}%</span></div>
+    <div class="sum-top">
+        <div class="sum-item">比例超標合計 <span class="sum-trim">{trim_pp:.1f}%</span></div>
+        <div class="sum-item">|</div>
+        <div class="sum-item">比例落後合計 <span class="sum-add">{add_pp:.1f}%</span></div>
+        <div class="sum-item">|</div>
+        <div class="sum-item">可用現金占比 <span class="sum-cash">{cash_pct:.1f}%</span></div>
+    </div>
+    {status_banner}
+    <div class="guide-box">
+        <div>📉 <b>高於目標（偏重）</b>：{over_text}</div>
+        <div>📈 <b>低於目標（可補）</b>：{under_text}</div>
+        <div style="margin-top:6px; color:#E2E8F0;"><b>📌 何時才算「真正觸發調整」？（兩大硬門檻，未達標不動手）</b></div>
+        <div>1️⃣ <b>條件一（池內槓桿輪動）</b>：台股或美股池的「正二實際占比」與「目標正二占比」差距<b>超過 10%</b>（例如目標 0%、現況 20.1%，偏離 20.1% &gt; 10%），才執行原型與正二互換。</div>
+        <div>2️⃣ <b>條件二（三大池比例失衡）</b>：台股(45%) / 美股(45%) / 費半(10%) 任一池占總資產比例與目標差距<b>超過 10%</b>；未達 10% 前，<b>只用新資金／可用現金優先買進「低於目標」的池子</b>即可，不必賣股。</div>
+        <div style="color:#94A3B8; margin-top:4px;">
+            💡 <b>紀律提醒</b>：照事前訂好的條件執行、不猜高低點；調整完畢就安心蓋牌過生活，並確保生活緊急預備金與投資／槓桿資金分開。
+        </div>
+    </div>
 </div>
 """)
 
@@ -439,4 +502,4 @@ with st.expander("📋 查看精確買賣股數建議（偏離 >10% 觸發再平
     _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670, us_p2, us_v2, us_2x_target)
     st.info(f"⚡ **費半衛星池 (00830)**：現價 {se_p1:.2f}，目前占比 {semi_cur_pct:.1f}%（目標 {semi_sug_pct:.1f}%），綜合積分 S = {data['SEMI']['score']:+.2f}")
 
-st.caption("🛡️ 紀律提醒：條件觸發照表操課、不猜低點；調整完畢即可安心蓋牌過生活，並確保緊急預備金與投資資金獨立切分[cite: 21]。")
+st.caption("🛡️ 紀律提醒：條件觸發照表操課、不猜低點；調整完畢即可安心蓋牌過生活，並確保緊急預備金與投資資金獨立切分。")
