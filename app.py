@@ -9,11 +9,25 @@ import numpy as np
 # 頁面設定（針對手機螢幕優化為置中版面）
 st.set_page_config(page_title="ETF 存股輪轉 LAB", page_icon="🚀", layout="centered")
 
-# 隱藏多餘選單，讓加到手機桌面後更像原生 App
+# 高對比卡片樣式（無論手機是淺色或深色模式，數字與標題都清楚好讀）
 st.markdown("""
 <style>
     .block-container { padding-top: 1.5rem; padding-bottom: 3rem; }
-    .stMetric { background-color: #1E293B; padding: 12px; border-radius: 12px; border: 1px solid #334155; }
+    [data-testid="stMetric"] {
+        background-color: #F8FAFC !important;
+        padding: 12px 14px !important;
+        border-radius: 12px !important;
+        border: 1px solid #CBD5E1 !important;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
+    [data-testid="stMetricLabel"] p {
+        color: #475569 !important;
+        font-weight: 600 !important;
+    }
+    [data-testid="stMetricValue"] div {
+        color: #0F172A !important;
+        font-weight: 700 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
