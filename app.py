@@ -31,32 +31,53 @@ render_html("""
         color: #F8FAFC;
         border: 1px solid #334155;
         border-radius: 14px;
-        padding: 16px 15px 14px 15px;
+        padding: 15px 14px 13px 14px;
         margin-bottom: 12px;
     }
     .pool-name {
         text-align: center; font-size: 1.12rem; font-weight: 700;
-        color: #F8FAFC; margin-bottom: 4px;
+        color: #F8FAFC; margin-bottom: 3px;
     }
     .pool-sub {
-        text-align: center; font-size: 0.78rem; color: #CBD5E1; margin-bottom: 8px;
-        min-height: 2.2em;
+        text-align: center; font-size: 0.77rem; color: #CBD5E1; margin-bottom: 6px;
+        min-height: 2.1em;
     }
     .stat-line {
         display: flex; justify-content: space-between; align-items: center;
-        font-size: 0.92rem; margin: 6px 0; color: #E2E8F0;
+        font-size: 0.90rem; margin: 5px 0; color: #E2E8F0;
     }
     .stat-val { font-weight: 700; color: #FFFFFF; }
-    .extra-line {
-        font-size: 0.78rem; color: #CBD5E1; margin-top: 6px; line-height: 1.35;
-    }
     .pp-pos { color: #4ADE80; font-weight: 700; }
     .pp-neg { color: #F87171; font-weight: 700; }
     .pp-zero { color: #CBD5E1; font-weight: 700; }
-    .z-block { margin-top: 10px; padding-top: 8px; border-top: 1px solid #1E293B; }
+    .mix-box {
+        margin-top: 9px; padding: 9px 10px;
+        background: #0F172A; border: 1px solid #1E293B; border-radius: 10px;
+    }
+    .mix-title {
+        font-size: 0.78rem; font-weight: 700; color: #E2E8F0; margin-bottom: 6px;
+        display: flex; justify-content: space-between;
+    }
+    .mix-row-label {
+        font-size: 0.73rem; color: #CBD5E1; margin-bottom: 3px;
+        display: flex; justify-content: space-between;
+    }
+    .mix-bar {
+        display: flex; height: 11px; width: 100%; border-radius: 6px;
+        overflow: hidden; background: #1E293B; margin-bottom: 6px;
+    }
+    .bar-1x { background: #38BDF8; height: 100%; }
+    .bar-2x { background: #F59E0B; height: 100%; }
+    .bar-none { background: #334155; height: 100%; }
+    .mix-legend {
+        font-size: 0.72rem; color: #CBD5E1; line-height: 1.4; margin-top: 4px;
+    }
+    .dot-1x { display:inline-block; width:8px; height:8px; border-radius:50%; background:#38BDF8; margin-right:4px; }
+    .dot-2x { display:inline-block; width:8px; height:8px; border-radius:50%; background:#F59E0B; margin-right:4px; }
+    .z-block { margin-top: 9px; padding-top: 8px; border-top: 1px solid #1E293B; }
     .z-row {
         display: flex; align-items: center; justify-content: space-between;
-        gap: 6px; font-size: 0.84rem; margin: 6px 0; color: #E2E8F0;
+        gap: 6px; font-size: 0.83rem; margin: 5px 0; color: #E2E8F0;
     }
     .z-track {
         position: relative; flex: 1; height: 6px; background: #334155;
@@ -162,13 +183,45 @@ def gauge_svg(pct_0_to_100, color="#34D399"):
     arc_len = 157.08
     dash = (pct / 100.0) * arc_len
     return (
-        f'<svg viewBox="0 0 140 78" style="width:100%;max-height:90px;display:block;margin:0 auto;">'
-        f'<path d="M 20 68 A 50 50 0 0 1 120 68" fill="none" stroke="#334155" stroke-width="11" stroke-linecap="round"/>'
-        f'<path d="M 20 68 A 50 50 0 0 1 120 68" fill="none" stroke="{color}" stroke-width="11" stroke-linecap="round" stroke-dasharray="{dash:.1f} {arc_len:.1f}"/>'
-        f'<text x="70" y="54" text-anchor="middle" fill="#FFFFFF" font-size="22" font-weight="800">{pct:.1f}%</text>'
-        f'<text x="20" y="76" text-anchor="middle" fill="#94A3B8" font-size="9">0%</text>'
-        f'<text x="120" y="76" text-anchor="middle" fill="#94A3B8" font-size="9">100%</text>'
+        f'<svg viewBox="0 0 140 76" style="width:100%;max-height:86px;display:block;margin:0 auto;">'
+        f'<path d="M 20 66 A 50 50 0 0 1 120 66" fill="none" stroke="#334155" stroke-width="11" stroke-linecap="round"/>'
+        f'<path d="M 20 66 A 50 50 0 0 1 120 66" fill="none" stroke="{color}" stroke-width="11" stroke-linecap="round" stroke-dasharray="{dash:.1f} {arc_len:.1f}"/>'
+        f'<text x="70" y="52" text-anchor="middle" fill="#FFFFFF" font-size="22" font-weight="800">{pct:.1f}%</text>'
+        f'<text x="20" y="74" text-anchor="middle" fill="#94A3B8" font-size="9">0%</text>'
+        f'<text x="120" y="74" text-anchor="middle" fill="#94A3B8" font-size="9">100%</text>'
         f'</svg>'
+    )
+
+def mix_visual_html(header_text, cur_1x_pct, cur_2x_pct, tgt_1x_pct, tgt_2x_pct, note_text):
+    c1 = max(0.0, min(100.0, cur_1x_pct))
+    c2 = max(0.0, min(100.0 - c1, cur_2x_pct))
+    cn = max(0.0, 100.0 - c1 - c2)
+
+    t1 = max(0.0, min(100.0, tgt_1x_pct))
+    t2 = max(0.0, min(100.0 - t1, tgt_2x_pct))
+    tn = max(0.0, 100.0 - t1 - t2)
+
+    return (
+        f'<div class="mix-box">'
+        f'<div class="mix-title"><span>{header_text}</span></div>'
+        f'<div class="mix-row-label"><span>現況</span><span>原型 {c1:.0f}% / 正二 {c2:.0f}%</span></div>'
+        f'<div class="mix-bar">'
+        f'<div class="bar-1x" style="width:{c1:.1f}%;"></div>'
+        f'<div class="bar-2x" style="width:{c2:.1f}%;"></div>'
+        f'<div class="bar-none" style="width:{cn:.1f}%;"></div>'
+        f'</div>'
+        f'<div class="mix-row-label"><span>目標</span><span>原型 {t1:.0f}% / 正二 {t2:.0f}%</span></div>'
+        f'<div class="mix-bar">'
+        f'<div class="bar-1x" style="width:{t1:.1f}%;"></div>'
+        f'<div class="bar-2x" style="width:{t2:.1f}%;"></div>'
+        f'<div class="bar-none" style="width:{tn:.1f}%;"></div>'
+        f'</div>'
+        f'<div class="mix-legend">'
+        f'<span class="dot-1x"></span>原型 ETF &nbsp;&nbsp;'
+        f'<span class="dot-2x"></span>槓桿型 (2x)<br>'
+        f'{note_text}'
+        f'</div>'
+        f'</div>'
     )
 
 def z_slider_html(label, z_val):
@@ -252,7 +305,30 @@ semi_sug_pct = POOL_TARGET["SEMI"] * 100.0
 tw_2x_target, tw_status = get_target_2x_ratio(data["TW"]["score"], data["TW"]["z_20w"])
 us_2x_target, us_status = get_target_2x_ratio(data["US"]["score"], data["US"]["z_20w"])
 
-# 總曝險（原型市值 + 正二市值 * 2）÷ 扣除外部借款後淨資產（正二市值按實際市值計入淨資產）
+# 池內原型 vs. 正二比例
+tw_pool_tot = max(1.0, tw_v1 + tw_v2)
+tw_c2_in = (tw_v2 / tw_pool_tot) * 100.0
+tw_c1_in = 100.0 - tw_c2_in
+tw_t2_in = tw_2x_target * 100.0
+tw_t1_in = 100.0 - tw_t2_in
+
+us_pool_tot = max(1.0, us_v1 + us_v2)
+us_c2_in = (us_v2 / us_pool_tot) * 100.0
+us_c1_in = 100.0 - us_c2_in
+us_t2_in = us_2x_target * 100.0
+us_t1_in = 100.0 - us_t2_in
+
+# 全組合原型 vs. 槓桿型（2x）占比
+tot_1x_val = tw_v1 + us_v1 + se_v1
+tot_2x_val = tw_v2 + us_v2
+all_c1_pct = (tot_1x_val / grand_tot * 100.0) if grand_tot > 0 else 0.0
+all_c2_pct = (tot_2x_val / grand_tot * 100.0) if grand_tot > 0 else 0.0
+
+# 目標全組合原型 vs. 2x 比例（依三大池目標與正二目標權重推算）
+all_t2_pct = (POOL_TARGET["TW"] * tw_2x_target + POOL_TARGET["US"] * us_2x_target) * 100.0
+all_t1_pct = max(0.0, 100.0 - cash_pct - all_t2_pct)
+
+# 總曝險（原型市值 + 正二市值 * 2）÷ 扣除外部借款後淨資產
 total_exp = (tw_v1 + us_v1 + se_v1) + 2.0 * (tw_v2 + us_v2)
 net_asset = max(1.0, grand_tot - ext_debt)
 real_lev  = total_exp / net_asset
@@ -265,7 +341,11 @@ cards = [
         "cur": tw_cur_pct, "sug": tw_sug_pct,
         "zw": data["TW"]["z_20w"], "zm": data["TW"]["z_20m"],
         "color": "#34D399" if abs(tw_cur_pct - tw_sug_pct) <= 10 else "#FBBF24",
-        "extra": f"池內正二：{(tw_v2/max(1,tw_v1+tw_v2)*100):.1f}% → 目標 {tw_2x_target*100:.0f}%"
+        "mix": mix_visual_html(
+            "池內 原型 vs. 正二",
+            tw_c1_in, tw_c2_in, tw_t1_in, tw_t2_in,
+            f"正二調整：{tw_c2_in:.1f}% → <b>{tw_t2_in:.0f}%</b>（差 {tw_t2_in - tw_c2_in:+.1f} pp）"
+        )
     },
     {
         "title": "美股核心池",
@@ -273,7 +353,11 @@ cards = [
         "cur": us_cur_pct, "sug": us_sug_pct,
         "zw": data["US"]["z_20w"], "zm": data["US"]["z_20m"],
         "color": "#60A5FA" if data["US"]["used_fallback"] else "#34D399",
-        "extra": f"池內正二：{(us_v2/max(1,us_v1+us_v2)*100):.1f}% → 目標 {us_2x_target*100:.0f}%"
+        "mix": mix_visual_html(
+            "池內 原型 vs. 正二",
+            us_c1_in, us_c2_in, us_t1_in, us_t2_in,
+            f"正二調整：{us_c2_in:.1f}% → <b>{us_t2_in:.0f}%</b>（差 {us_t2_in - us_c2_in:+.1f} pp）"
+        )
     },
     {
         "title": "費半衛星池",
@@ -281,15 +365,23 @@ cards = [
         "cur": semi_cur_pct, "sug": semi_sug_pct,
         "zw": data["SEMI"]["z_20w"], "zm": data["SEMI"]["z_20m"],
         "color": "#34D399" if abs(semi_cur_pct - semi_sug_pct) <= 10 else "#F87171",
-        "extra": "純 1x 原型 · 動能溫度計"
+        "mix": mix_visual_html(
+            "衛星池 結構（純 1x）",
+            100.0 if se_v1 > 0 else 0.0, 0.0, 100.0, 0.0,
+            "00830 維持 <b>1x 原型</b>，作動能溫度計"
+        )
     },
     {
-        "title": "總資產與槓桿",
+        "title": "全組合 原型/正二",
         "sub": f"總市值 NT$ {grand_tot:,.0f} · 真實槓桿 {real_lev:.2f}x",
         "cur": min(100.0, (real_lev / 2.5) * 100.0), "sug": 68.0,
         "zw": data["TW"]["score"], "zm": data["US"]["score"],
         "color": "#34D399" if real_lev <= 2.0 else "#F87171",
-        "extra": f"台股燈號：{tw_status.split(' ')[0]} ｜ 美股燈號：{us_status.split(' ')[0]}"
+        "mix": mix_visual_html(
+            "全組合 原型 vs. 正二",
+            all_c1_pct, all_c2_pct, all_t1_pct, all_t2_pct,
+            f"正二全組合：{all_c2_pct:.1f}% → <b>{all_t2_pct:.1f}%</b>"
+        )
     }
 ]
 
@@ -303,7 +395,7 @@ for idx, c in enumerate(cards):
         f'{gauge_svg(c["cur"], c["color"])}'
         f'<div class="stat-line"><span>目前持有</span><span class="stat-val">{c["cur"]:.1f}%</span></div>'
         f'<div class="stat-line"><span>建議配置</span><span><strong class="stat-val">{c["sug"]:.1f}%</strong> &nbsp;{fmt_pp(diff_pp)}</span></div>'
-        f'<div class="extra-line">{c["extra"]}</div>'
+        f'{c["mix"]}'
         f'<div class="z-block">'
         f'{z_slider_html("20 週", c["zw"])}'
         f'{z_slider_html("20 月", c["zm"])}'
@@ -347,4 +439,4 @@ with st.expander("📋 查看精確買賣股數建議（偏離 >10% 觸發再平
     _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670, us_p2, us_v2, us_2x_target)
     st.info(f"⚡ **費半衛星池 (00830)**：現價 {se_p1:.2f}，目前占比 {semi_cur_pct:.1f}%（目標 {semi_sug_pct:.1f}%），綜合積分 S = {data['SEMI']['score']:+.2f}")
 
-st.caption("🛡️ 紀律提醒：條件觸發照表操課、不猜低點；調整完畢即可安心蓋牌過生活，並確保緊急預備金與投資資金獨立切分。")
+st.caption("🛡️ 紀律提醒：條件觸發照表操課、不猜低點；調整完畢即可安心蓋牌過生活，並確保緊急預備金與投資資金獨立切分[cite: 21]。")
