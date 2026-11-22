@@ -173,13 +173,29 @@ def build_1y_weekly_turns(ticker, w_week, w_month, is_leveraged_pool=True):
     if is_leveraged_pool:
         w_df["t2x"] = [get_target_2x_ratio(s, zw)[0] for s, zw in zip(w_df["score"], w_df["z20w"])]
     else:
-        # 費半衛星池 00830 為純 1x 原型動能溫度計（過熱降溫 0.5 / 正常 1.0 / 修正 0.0）
         w_df["t2x"] = [0.5 if s >= 2.4 else (0.0 if s <= -0.4 else 1.0) for s in w_df["score"]]
 
     cutoff = w_df.index[-1] - pd.Timedelta(days=365)
     w_1y = w_df[w_df.index >= cutoff].copy()
     w_1y["prev_t2x"] = w_1y["t2x"].shift(1)
     turns = w_1y[(w_1y["prev_t2x"].notna()) & (w_1y["t2x"] != w_1y["prev_t2x"])].copy()
+
+    latest_dt = w_1y.index[-1]
+    latest_px = float(w_1y["px"].iloc[-1])
+    cum_rets, ann_rets = [], []
+    for dt, r in turns.iterrows():
+        days = max(1, (latest_dt - dt).days)
+        p0 = float(r["px"])
+        cum_r = (latest_px / p0 - 1.0) * 100.0
+        cum_rets.append(f"{cum_r:+.1f}%")
+        if days >= 21 and p0 > 0 and latest_px > 0:
+            cagr = ((latest_px / p0) ** (365.25 / days) - 1.0) * 100.0
+            ann_rets.append(f"{cagr:+.1f}% (年化)")
+        else:
+            ann_rets.append("未滿3週（看累積）")
+
+    turns["cum_ret"] = cum_rets
+    turns["ann_ret"] = ann_rets
     return w_1y, turns
 
 @st.cache_data(ttl=600)
@@ -226,9 +242,9 @@ def fetch_market_data():
         "p_631": _latest("00631L.TW"),
         "p_670": _latest("00670L.TW"),
         "turns_map": {
-            "美股 QQQ (對應 00662/00670L)": (qqq_1y, qqq_turns, "USD", True),
-            "台股 0050 (對應 0050/00631L)": (tw_1y, tw_turns, "TWD", True),
-            "費半 00830 (原型動能溫度計)": (se_1y, se_turns, "TWD", False),
+            "美股 QQQ (00662/00670L)": ("QQQ", qqq_1y, qqq_turns, "USD", True),
+            "台股 0050 (0050/00631L)": ("0050.TW", tw_1y, tw_turns, "TWD", True),
+            "費半 00830 (原型動能)": ("00830.TW", se_1y, se_turns, "TWD", False),
         }
     }
 
@@ -528,14 +544,14 @@ with st.expander("📋 查看精確買賣股數建議（偏離 >10% 觸發再平
     _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670, us_p2, us_v2, us_2x_target)
     st.info(f"⚡ **費半衛星池 (00830)**：現價 {se_p1:.2f}，目前占比 {semi_cur_pct:.1f}%（目標 {semi_sug_pct:.1f}%），綜合積分 S = {data['SEMI']['score']:+.2f}")
 
-# ================= 過去一年周線輪轉切換區（美股 QQQ / 台股 0050 / 費半 00830） =================
-with st.expander("📈 過去一年周線輪轉 Trend Chart 與轉折點明細（美股 QQQ / 台股 0050 / 費半 00830）", expanded=True):
+# ================= 過去一年周線輪轉切換區（含各點位年化報酬率） =================
+with st.expander("📈 過去一年周線輪轉 Trend Chart 與轉折點年化報酬明細", expanded=True):
     selected_target = st.radio(
         "選擇要查看的標的近一年周線轉折：",
         list(data["turns_map"].keys()),
         horizontal=True
     )
-    q1y, turns, ccy, is_lev = data["turns_map"][selected_target]
+    sym_code, q1y, turns, ccy, is_lev = data["turns_map"][selected_target]
     px_prefix = "$" if ccy == "USD" else "NT$"
 
     fig, ax = plt.subplots(figsize=(11, 4.6), dpi=130)
@@ -559,13 +575,13 @@ with st.expander("📈 過去一年周線輪轉 Trend Chart 與轉折點明細�
         cur_t = row["t2x"]
         if cur_t <= 0.01:
             col, fc, tc = "#EF4444", "#450A0A", "#FCA5A5"
-            lbl = f"2x->1x {px_prefix}{row['px']:.1f}" if is_lev else f"防禦 {px_prefix}{row['px']:.1f}"
+            lbl = f"2x->1x {px_prefix}{row['px']:.1f}" if is_lev else f"Def {px_prefix}{row['px']:.1f}"
         elif cur_t >= 0.99:
             col, fc, tc = "#22C55E", "#052E16", "#86EFAC"
-            lbl = f"->2x {px_prefix}{row['px']:.1f}" if is_lev else f"多頭 {px_prefix}{row['px']:.1f}"
+            lbl = f"->2x {px_prefix}{row['px']:.1f}" if is_lev else f"Bull {px_prefix}{row['px']:.1f}"
         else:
             col, fc, tc = "#F59E0B", "#451A03", "#FDE68A"
-            lbl = f"->0.5x {px_prefix}{row['px']:.1f}" if is_lev else f"降溫 {px_prefix}{row['px']:.1f}"
+            lbl = f"->0.5x {px_prefix}{row['px']:.1f}" if is_lev else f"Cool {px_prefix}{row['px']:.1f}"
 
         ax.scatter(dt, row["px"], color=col, s=65, zorder=6, edgecolors="#FFFFFF", linewidth=0.9)
         ax.annotate(
@@ -576,7 +592,7 @@ with st.expander("📈 過去一年周線輪轉 Trend Chart 與轉折點明細�
             arrowprops=dict(arrowstyle="->", color=col, lw=0.9)
         )
 
-    ax.set_title(f"{selected_target} — 1-Year Weekly Trend & Turning Points", fontsize=11, fontweight="bold", color="#F8FAFC", pad=10)
+    ax.set_title(f"{sym_code} — 1-Year Weekly Trend & Turning Points", fontsize=11, fontweight="bold", color="#F8FAFC", pad=10)
     ax.set_ylabel(f"Price ({ccy})", fontsize=9.5, color="#CBD5E1")
     ax.tick_params(colors="#CBD5E1", labelsize=8.5)
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
@@ -619,13 +635,14 @@ with st.expander("📈 過去一年周線輪轉 Trend Chart 與轉折點明細�
             rows_disp.append({
                 "轉折日期": dt.strftime("%Y-%m-%d"),
                 "週收盤價": f"{px_prefix}{r['px']:.2f}",
-                "20週 Z值": f"{r['z20w']:+.2f}",
-                "20月 Z值": f"{r['z20m']:+.2f}",
                 "綜合積分 S": f"{r['score']:+.2f}",
                 "目標變化": f"{prev_lbl} → {curr_lbl}",
+                "至今累積報酬": r["cum_ret"],
+                "折合年化報酬": r["ann_ret"],
                 "對應操作方向": action_hint,
             })
         st.dataframe(pd.DataFrame(rows_disp), use_container_width=True, hide_index=True)
+        st.caption("註：累積報酬與折合年化報酬皆以該轉折點週收盤至最新週收盤計算（未滿 3 週不強行折算年化，避免短期間放大誤差）。")
     else:
         st.info("近一年內未發生跨區間轉折切換。")
 
