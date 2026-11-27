@@ -6,10 +6,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from matplotlib.patches import Patch
-from matplotlib.lines import Line2D
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="ETF 持股輪動 LAB", page_icon="📊", layout="wide")
 
@@ -127,6 +124,7 @@ render_html("""
 """)
 
 POOL_TARGET = {"TW": 0.45, "US": 0.45, "SEMI": 0.10}
+MAX_STEP = 0.10  # 每次調整變化上限 10%，降低執行心理壓力並增加試錯餘裕
 
 def calc_z_and_score(close_series, w_week, w_month):
     close = close_series.dropna().copy()
@@ -143,22 +141,41 @@ def calc_z_and_score(close_series, w_week, w_month):
     score = w_week * z_20w + w_month * z_20m
     return latest_price, latest_date, z_20w, z_20m, score
 
-def get_target_2x_ratio(score, z_20w):
+def get_raw_target_2x(score, z_20w):
+    if pd.isna(score) or pd.isna(z_20w):
+        return 0.50, "資料暖機區 (理想 1.5x)"
     if score >= 2.4:
-        return 0.50, "極度過熱降溫 (目標 1.5x)"
+        return 0.50, "極度過熱降溫 (理想 1.5x)"
     elif score >= 0.4:
         if z_20w < -1.0:
-            return 0.50, "多頭急殺煞車 (目標 1.5x)"
-        return 1.00, "強勢多頭主升段 (目標 2.0x)"
+            return 0.50, "多頭急殺煞車 (理想 1.5x)"
+        return 1.00, "強勢多頭主升段 (理想 2.0x)"
     elif score <= -0.4:
         if z_20w > 0.2:
-            return 0.50, "底部週線V轉反攻 (目標 1.5x)"
-        return 0.00, "空頭主跌防禦區 (目標 1.0x)"
+            return 0.50, "底部週線V轉反攻 (理想 1.5x)"
+        return 0.00, "空頭主跌防禦區 (理想 1.0x)"
     else:
-        return 0.50, "多空緩衝過渡區 (目標 1.5x)"
+        return 0.50, "多空緩衝過渡區 (理想 1.5x)"
 
-def build_1y_weekly_turns(ticker, w_week, w_month, is_leveraged_pool=True):
-    hist = yf.Ticker(ticker).history(period="3y", auto_adjust=True)["Close"].dropna()
+def apply_step_cap(raw_targets, max_step=0.10):
+    """每次目標變化上限 10%（漸進式分批調整，避免一次大幅換倉的心理壓力）"""
+    stepped = []
+    cur = None
+    for raw in raw_targets:
+        if cur is None:
+            cur = float(raw)
+        else:
+            diff = float(raw) - cur
+            if abs(diff) <= max_step + 1e-9:
+                cur = float(raw)
+            else:
+                cur = round(cur + np.sign(diff) * max_step, 2)
+        stepped.append(cur)
+    return stepped
+
+def build_5y_weekly_turns(ticker, w_week, w_month, is_leveraged_pool=True):
+    # 抓取 7 年日線資料，確保 5 年前起點已具備完整 20 週與 20 月統計暖機
+    hist = yf.Ticker(ticker).history(period="7y", auto_adjust=True)["Close"].dropna()
     hist.index = hist.index.tz_localize(None)
     w_s = hist.resample("W-FRI").last().dropna()
     m_s = hist.resample("ME").last().dropna()
@@ -171,17 +188,22 @@ def build_1y_weekly_turns(ticker, w_week, w_month, is_leveraged_pool=True):
     w_df["score"] = w_week * w_df["z20w"] + w_month * w_df["z20m"]
 
     if is_leveraged_pool:
-        w_df["t2x"] = [get_target_2x_ratio(s, zw)[0] for s, zw in zip(w_df["score"], w_df["z20w"])]
+        raw_list = [get_raw_target_2x(s, zw)[0] for s, zw in zip(w_df["score"], w_df["z20w"])]
+        w_df["raw_t2x"] = raw_list
+        w_df["t2x"] = apply_step_cap(raw_list, MAX_STEP)
     else:
-        w_df["t2x"] = [0.5 if s >= 2.4 else (0.0 if s <= -0.4 else 1.0) for s in w_df["score"]]
+        # 費半 00830 為 1x 原型動能溫度計，同樣套用單次最多調整 10% 檔位步進
+        raw_list = [0.5 if s >= 2.4 else (0.0 if s <= -0.4 else 1.0) for s in w_df["score"]]
+        w_df["raw_t2x"] = raw_list
+        w_df["t2x"] = apply_step_cap(raw_list, MAX_STEP)
 
-    cutoff = w_df.index[-1] - pd.Timedelta(days=365)
-    w_1y = w_df[w_df.index >= cutoff].copy()
-    w_1y["prev_t2x"] = w_1y["t2x"].shift(1)
-    turns = w_1y[(w_1y["prev_t2x"].notna()) & (w_1y["t2x"] != w_1y["prev_t2x"])].copy()
+    cutoff = w_df.index[-1] - pd.Timedelta(days=365 * 5)
+    w_5y = w_df[w_df.index >= cutoff].copy()
+    w_5y["prev_t2x"] = w_5y["t2x"].shift(1)
+    turns = w_5y[(w_5y["prev_t2x"].notna()) & ((w_5y["t2x"] - w_5y["prev_t2x"]).abs() > 1e-6)].copy()
 
-    latest_dt = w_1y.index[-1]
-    latest_px = float(w_1y["px"].iloc[-1])
+    latest_dt = w_5y.index[-1]
+    latest_px = float(w_5y["px"].iloc[-1])
     cum_rets, ann_rets = [], []
     for dt, r in turns.iterrows():
         days = max(1, (latest_dt - dt).days)
@@ -196,7 +218,7 @@ def build_1y_weekly_turns(ticker, w_week, w_month, is_leveraged_pool=True):
 
     turns["cum_ret"] = cum_rets
     turns["ann_ret"] = ann_rets
-    return w_1y, turns
+    return w_5y, turns
 
 @st.cache_data(ttl=600)
 def fetch_market_data():
@@ -231,9 +253,9 @@ def fetch_market_data():
     def _latest(ticker):
         return float(yf.Ticker(ticker).history(period="5d", auto_adjust=True)["Close"].dropna().iloc[-1])
 
-    qqq_1y, qqq_turns = build_1y_weekly_turns("QQQ", 0.50, 0.50, is_leveraged_pool=True)
-    tw_1y, tw_turns   = build_1y_weekly_turns("0050.TW", 0.65, 0.35, is_leveraged_pool=True)
-    se_1y, se_turns   = build_1y_weekly_turns("00830.TW", 0.50, 0.50, is_leveraged_pool=False)
+    qqq_5y, qqq_turns = build_5y_weekly_turns("QQQ", 0.50, 0.50, is_leveraged_pool=True)
+    tw_5y, tw_turns   = build_5y_weekly_turns("0050.TW", 0.65, 0.35, is_leveraged_pool=True)
+    se_5y, se_turns   = build_5y_weekly_turns("00830.TW", 0.50, 0.50, is_leveraged_pool=False)
 
     return {
         "TW": _fetch_pool("0050.TW", 0.65, 0.35),
@@ -242,11 +264,18 @@ def fetch_market_data():
         "p_631": _latest("00631L.TW"),
         "p_670": _latest("00670L.TW"),
         "turns_map": {
-            "美股 QQQ (00662/00670L)": ("QQQ", qqq_1y, qqq_turns, "USD", True),
-            "台股 0050 (0050/00631L)": ("0050.TW", tw_1y, tw_turns, "TWD", True),
-            "費半 00830 (原型動能)": ("00830.TW", se_1y, se_turns, "TWD", False),
+            "美股 QQQ (對應 00662/00670L)": ("QQQ", qqq_5y, qqq_turns, "USD", True),
+            "台股 0050 (對應 0050/00631L)": ("0050.TW", tw_5y, tw_turns, "TWD", True),
+            "費半 00830 (原型動能)": ("00830.TW", se_5y, se_turns, "TWD", False),
         }
     }
+
+def step_toward(current_ratio, ideal_ratio, max_step=0.10):
+    """計算本週單次上限 10% 的漸進調整目標"""
+    diff = ideal_ratio - current_ratio
+    if abs(diff) <= max_step + 1e-9:
+        return round(ideal_ratio, 4)
+    return round(current_ratio + np.sign(diff) * max_step, 4)
 
 def gauge_svg(pct_0_to_100, color="#34D399"):
     pct = max(0.0, min(100.0, pct_0_to_100))
@@ -280,7 +309,7 @@ def mix_visual_html(header_text, cur_1x_pct, cur_2x_pct, tgt_1x_pct, tgt_2x_pct,
         f'<div class="bar-2x" style="width:{c2:.1f}%;"></div>'
         f'<div class="bar-none" style="width:{cn:.1f}%;"></div>'
         f'</div>'
-        f'<div class="mix-row-label"><span>目標</span><span>原型 {t1:.0f}% / 正二 {t2:.0f}%</span></div>'
+        f'<div class="mix-row-label"><span>本週目標（上限±10%）</span><span>原型 {t1:.0f}% / 正二 {t2:.0f}%</span></div>'
         f'<div class="mix-bar">'
         f'<div class="bar-1x" style="width:{t1:.1f}%;"></div>'
         f'<div class="bar-2x" style="width:{t2:.1f}%;"></div>'
@@ -326,7 +355,7 @@ with col_t:
     render_html("""
     <div class="lab-header">
         <span class="lab-title">ETF 持股輪動 LAB</span>
-        <span class="lab-sub">20 週／20 月位階</span>
+        <span class="lab-sub">20 週／20 月位階 · 單次上限 ±10%</span>
         <span class="lab-badge">45 / 45 / 10 積極檔</span>
     </div>
     """)
@@ -334,7 +363,7 @@ with col_b:
     if st.button("🔄 更新報價", use_container_width=True):
         st.cache_data.clear()
 
-with st.spinner("正在抓取五檔最新還原權息報價與近一年周線轉折..."):
+with st.spinner("正在抓取五檔最新還原權息報價與近五年周線轉折..."):
     data = fetch_market_data()
 
 with st.expander("📝 輸入／修改目前持股與資金（預設為範例數據，可依實際庫存調整）", expanded=False):
@@ -369,19 +398,26 @@ tw_sug_pct   = POOL_TARGET["TW"] * 100.0
 us_sug_pct   = POOL_TARGET["US"] * 100.0
 semi_sug_pct = POOL_TARGET["SEMI"] * 100.0
 
-tw_2x_target, tw_status = get_target_2x_ratio(data["TW"]["score"], data["TW"]["z_20w"])
-us_2x_target, us_status = get_target_2x_ratio(data["US"]["score"], data["US"]["z_20w"])
+# 理想目標 vs. 本週漸進目標（每次變化上限 10%）
+tw_ideal_2x, tw_status = get_raw_target_2x(data["TW"]["score"], data["TW"]["z_20w"])
+us_ideal_2x, us_status = get_raw_target_2x(data["US"]["score"], data["US"]["z_20w"])
 
 tw_pool_tot = max(1.0, tw_v1 + tw_v2)
-tw_c2_in = (tw_v2 / tw_pool_tot) * 100.0
+tw_cur_2x_ratio = (tw_v2 / tw_pool_tot) if (tw_v1 + tw_v2) > 0 else 0.0
+tw_step_2x = step_toward(tw_cur_2x_ratio, tw_ideal_2x, MAX_STEP)
+
+tw_c2_in = tw_cur_2x_ratio * 100.0
 tw_c1_in = 100.0 - tw_c2_in
-tw_t2_in = tw_2x_target * 100.0
+tw_t2_in = tw_step_2x * 100.0
 tw_t1_in = 100.0 - tw_t2_in
 
 us_pool_tot = max(1.0, us_v1 + us_v2)
-us_c2_in = (us_v2 / us_pool_tot) * 100.0
+us_cur_2x_ratio = (us_v2 / us_pool_tot) if (us_v1 + us_v2) > 0 else 0.0
+us_step_2x = step_toward(us_cur_2x_ratio, us_ideal_2x, MAX_STEP)
+
+us_c2_in = us_cur_2x_ratio * 100.0
 us_c1_in = 100.0 - us_c2_in
-us_t2_in = us_2x_target * 100.0
+us_t2_in = us_step_2x * 100.0
 us_t1_in = 100.0 - us_t2_in
 
 tot_1x_val = tw_v1 + us_v1 + se_v1
@@ -389,7 +425,7 @@ tot_2x_val = tw_v2 + us_v2
 all_c1_pct = (tot_1x_val / grand_tot * 100.0) if grand_tot > 0 else 0.0
 all_c2_pct = (tot_2x_val / grand_tot * 100.0) if grand_tot > 0 else 0.0
 
-all_t2_pct = (POOL_TARGET["TW"] * tw_2x_target + POOL_TARGET["US"] * us_2x_target) * 100.0
+all_t2_pct = (POOL_TARGET["TW"] * tw_step_2x + POOL_TARGET["US"] * us_step_2x) * 100.0
 all_t1_pct = max(0.0, 100.0 - cash_pct - all_t2_pct)
 
 total_exp = (tw_v1 + us_v1 + se_v1) + 2.0 * (tw_v2 + us_v2)
@@ -406,7 +442,7 @@ cards = [
         "mix": mix_visual_html(
             "池內 原型 vs. 正二",
             tw_c1_in, tw_c2_in, tw_t1_in, tw_t2_in,
-            f"正二調整：{tw_c2_in:.1f}% → <b>{tw_t2_in:.0f}%</b>（差 {tw_t2_in - tw_c2_in:+.1f} pp）"
+            f"本週步進：{tw_c2_in:.1f}% → <b>{tw_t2_in:.1f}%</b>（終極理想 {tw_ideal_2x*100:.0f}%）"
         )
     },
     {
@@ -418,7 +454,7 @@ cards = [
         "mix": mix_visual_html(
             "池內 原型 vs. 正二",
             us_c1_in, us_c2_in, us_t1_in, us_t2_in,
-            f"正二調整：{us_c2_in:.1f}% → <b>{us_t2_in:.0f}%</b>（差 {us_t2_in - us_c2_in:+.1f} pp）"
+            f"本週步進：{us_c2_in:.1f}% → <b>{us_t2_in:.1f}%</b>（終極理想 {us_ideal_2x*100:.0f}%）"
         )
     },
     {
@@ -442,7 +478,7 @@ cards = [
         "mix": mix_visual_html(
             "全組合 原型 vs. 正二",
             all_c1_pct, all_c2_pct, all_t1_pct, all_t2_pct,
-            f"正二全組合：{all_c2_pct:.1f}% → <b>{all_t2_pct:.1f}%</b>"
+            f"本週全組合正二：{all_c2_pct:.1f}% → <b>{all_t2_pct:.1f}%</b>"
         )
     }
 ]
@@ -482,10 +518,10 @@ over_text   = "、".join(over_pools) if over_pools else "目前無明顯超標�
 under_text  = "、".join(under_pools) if under_pools else "目前無明顯落後池"
 
 triggered_reasons = []
-if abs(tw_c2_in - tw_t2_in) > 10.0 and (tw_v1 + tw_v2) > 0:
-    triggered_reasons.append(f"台股池正二偏離 {abs(tw_c2_in - tw_t2_in):.1f}%（>10%）")
-if abs(us_c2_in - us_t2_in) > 10.0 and (us_v1 + us_v2) > 0:
-    triggered_reasons.append(f"美股池正二偏離 {abs(us_c2_in - us_t2_in):.1f}%（>10%）")
+if abs(tw_cur_2x_ratio - tw_ideal_2x) > 0.01 and (tw_v1 + tw_v2) > 0:
+    triggered_reasons.append(f"台股正二距離理想目標差 {abs(tw_c2_in - tw_ideal_2x*100):.1f}%（本週漸進調 ±10%）")
+if abs(us_cur_2x_ratio - us_ideal_2x) > 0.01 and (us_v1 + us_v2) > 0:
+    triggered_reasons.append(f"美股正二距離理想目標差 {abs(us_c2_in - us_ideal_2x*100):.1f}%（本週漸進調 ±10%）")
 for n, c, s in pool_map:
     if abs(c - s) > 10.0 and invest_tot > 0:
         triggered_reasons.append(f"{n}整體占比偏離 {abs(c - s):.1f}%（>10%）")
@@ -493,13 +529,13 @@ for n, c, s in pool_map:
 if triggered_reasons:
     status_banner = (
         f'<div class="trigger-banner-on">'
-        f'🔔 【今日狀態：已觸發調整條件】{" ｜ ".join(triggered_reasons)} → 請依下方股數清單執行再平衡。'
+        f'🔔 【今日狀態：啟動漸進式調整（單次上限 ±10%）】{" ｜ ".join(triggered_reasons)}'
         f'</div>'
     )
 else:
     status_banner = (
         f'<div class="trigger-banner-off">'
-        f'🟢 【今日狀態：未觸發調整條件】所有池內正二與整體占比偏離皆在 10% 容許範圍內 → 不需換股，安心蓋牌過生活！'
+        f'🟢 【今日狀態：已貼合目標配置】所有池內正二與整體占比皆在容許範圍內 → 不需換股，安心蓋牌過生活！'
         f'</div>'
     )
 
@@ -516,9 +552,9 @@ render_html(f"""
     <div class="guide-box">
         <div>📉 <b>高於目標（偏重）</b>：{over_text}</div>
         <div>📈 <b>低於目標（可補）</b>：{under_text}</div>
-        <div style="margin-top:6px; color:#E2E8F0;"><b>📌 何時才算「真正觸發調整」？（兩大硬門檻，未達標不動手）</b></div>
-        <div>1️⃣ <b>條件一（池內槓桿輪動）</b>：台股或美股池的「正二實際占比」與「目標正二占比」差距<b>超過 10%</b>，才執行原型與正二互換。</div>
-        <div>2️⃣ <b>條件二（三大池比例失衡）</b>：台股(45%) / 美股(45%) / 費半(10%) 任一池占總資產比例與目標差距<b>超過 10%</b>；未達 10% 前，可優先用新資金／可用現金往落後部位調整。</div>
+        <div style="margin-top:6px; color:#E2E8F0;"><b>📌 漸進式輪轉規則（單次變化上限 10%，順應人性、分批試錯）</b></div>
+        <div>1️⃣ <b>單次最多調整 10%</b>：即使訊號從 100% 轉為 0% 防禦，每週最多只移動 <b>10%</b> 倉位（分多週逐步到位），避免一次砍在低點或追在高點的心理抗拒。</div>
+        <div>2️⃣ <b>三大池比例失衡（>10%）</b>：未達 10% 偏離前，可優先用新資金／可用現金往落後池子買進，減少賣股摩擦。</div>
         <div style="color:#94A3B8; margin-top:4px;">
             💡 <b>紀律提醒</b>：照事前訂好的條件執行、不猜高低點；調整完畢就安心蓋牌過生活，並確保生活緊急預備金與投資／槓桿資金分開。
         </div>
@@ -526,124 +562,201 @@ render_html(f"""
 </div>
 """)
 
-with st.expander("📋 查看精確買賣股數建議（偏離 >10% 觸發再平衡）", expanded=True):
-    def _pool_action(name, s1, p1, v1, s2, p2, v2, t2x):
+with st.expander("📋 查看本週精確買賣股數建議（單次最多調整 10% 步進目標）", expanded=True):
+    def _pool_action(name, s1, p1, v1, s2, p2, v2, step_2x, ideal_2x):
         ptot = v1 + v2
         cur2 = (v2 / ptot) if ptot > 0 else 0.0
-        dev = abs(cur2 - t2x)
-        if dev > 0.10 and ptot > 0:
-            ds1 = int((ptot * (1 - t2x) - v1) // p1)
-            ds2 = int((ptot * t2x - v2) // p2)
+        gap = abs(cur2 - ideal_2x)
+        if gap > 0.01 and ptot > 0:
+            ds1 = int((ptot * (1 - step_2x) - v1) // p1)
+            ds2 = int((ptot * step_2x - v2) // p2)
             a1 = f"買進 {ds1:,} 股" if ds1 >= 0 else f"賣出 {abs(ds1):,} 股"
             a2 = f"買進 {ds2:,} 股" if ds2 >= 0 else f"賣出 {abs(ds2):,} 股"
-            st.error(f"🔔 **{name}（偏離 {dev*100:.1f}% > 10%）**：原型 {a1} ｜ 正二 {a2}")
+            st.warning(
+                f"🔔 **{name}**（現況正二 {cur2*100:.1f}% → 本週步進目標 **{step_2x*100:.1f}%**，終極理想 {ideal_2x*100:.0f}%）：\n"
+                f"- 原型 {a1} ｜ 正二 {a2}"
+            )
         else:
-            st.success(f"✅ **{name}（偏離 {dev*100:.1f}% ≤ 10%）**：維持現狀不需換股")
+            st.success(f"✅ **{name}（已貼合目標 {ideal_2x*100:.0f}%）**：維持現狀不需換股")
 
-    _pool_action("台股核心池 (0050/00631L)", s_0050, tw_p1, tw_v1, s_631, tw_p2, tw_v2, tw_2x_target)
-    _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670, us_p2, us_v2, us_2x_target)
+    _pool_action("台股核心池 (0050/00631L)", s_0050, tw_p1, tw_v1, s_631, tw_p2, tw_v2, tw_step_2x, tw_ideal_2x)
+    _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670, us_p2, us_v2, us_step_2x, us_ideal_2x)
     st.info(f"⚡ **費半衛星池 (00830)**：現價 {se_p1:.2f}，目前占比 {semi_cur_pct:.1f}%（目標 {semi_sug_pct:.1f}%），綜合積分 S = {data['SEMI']['score']:+.2f}")
 
-# ================= 過去一年周線輪轉切換區（含各點位年化報酬率） =================
-with st.expander("📈 過去一年周線輪轉 Trend Chart 與轉折點年化報酬明細", expanded=True):
-    selected_target = st.radio(
-        "選擇要查看的標的近一年周線轉折：",
-        list(data["turns_map"].keys()),
-        horizontal=True
-    )
-    sym_code, q1y, turns, ccy, is_lev = data["turns_map"][selected_target]
-    px_prefix = "$" if ccy == "USD" else "NT$"
-
-    fig, ax = plt.subplots(figsize=(11, 4.6), dpi=130)
-    fig.patch.set_facecolor("#111827")
-    ax.set_facecolor("#0F172A")
-
-    for i in range(len(q1y) - 1):
-        t2 = q1y["t2x"].iloc[i]
-        d0, d1 = q1y.index[i], q1y.index[i + 1]
-        if t2 >= 0.99:
-            ax.axvspan(d0, d1, color="#10B981", alpha=0.14, lw=0)
-        elif t2 <= 0.01:
-            ax.axvspan(d0, d1, color="#3B82F6", alpha=0.18, lw=0)
-        else:
-            ax.axvspan(d0, d1, color="#F59E0B", alpha=0.10, lw=0)
-
-    ax.plot(q1y.index, q1y["px"], color="#F8FAFC", linewidth=2.2, label="Weekly Close", zorder=3)
-    ax.plot(q1y.index, q1y["ma20w"], color="#94A3B8", linewidth=1.2, linestyle="--", label="20-Week MA", zorder=2)
-
-    for dt, row in turns.iterrows():
-        cur_t = row["t2x"]
-        if cur_t <= 0.01:
-            col, fc, tc = "#EF4444", "#450A0A", "#FCA5A5"
-            lbl = f"2x->1x {px_prefix}{row['px']:.1f}" if is_lev else f"Def {px_prefix}{row['px']:.1f}"
-        elif cur_t >= 0.99:
-            col, fc, tc = "#22C55E", "#052E16", "#86EFAC"
-            lbl = f"->2x {px_prefix}{row['px']:.1f}" if is_lev else f"Bull {px_prefix}{row['px']:.1f}"
-        else:
-            col, fc, tc = "#F59E0B", "#451A03", "#FDE68A"
-            lbl = f"->0.5x {px_prefix}{row['px']:.1f}" if is_lev else f"Cool {px_prefix}{row['px']:.1f}"
-
-        ax.scatter(dt, row["px"], color=col, s=65, zorder=6, edgecolors="#FFFFFF", linewidth=0.9)
-        ax.annotate(
-            f"{lbl}\n{dt.strftime('%m-%d')}",
-            xy=(dt, row["px"]), xytext=(0, 18 if cur_t >= 0.5 else -26),
-            textcoords="offset points", ha="center", fontsize=7.5, fontweight="bold", color=tc,
-            bbox=dict(boxstyle="round,pad=0.2", fc=fc, ec=col, lw=0.8),
-            arrowprops=dict(arrowstyle="->", color=col, lw=0.9)
+# ================= 過去五年周線輪轉互動式趨勢圖（支援縮放 ＋ 游標顯示完整策略資訊） =================
+with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點年化報酬明細（單次上限 ±10%）", expanded=True):
+    col_sel1, col_sel2 = st.columns([3, 2])
+    with col_sel1:
+        selected_target = st.radio(
+            "選擇要查看的標的近五年周線轉折：",
+            list(data["turns_map"].keys()),
+            horizontal=True
+        )
+    with col_sel2:
+        zoom_range = st.selectbox(
+            "快速縮放檢視區間（也可直接在圖表上框選／滾輪縮放／拖曳下方時間軸）：",
+            ["近 5 年完整走勢", "近 3 年走勢", "近 1 年走勢", "近 6 個月走勢"],
+            index=0
         )
 
-    ax.set_title(f"{sym_code} — 1-Year Weekly Trend & Turning Points", fontsize=11, fontweight="bold", color="#F8FAFC", pad=10)
-    ax.set_ylabel(f"Price ({ccy})", fontsize=9.5, color="#CBD5E1")
-    ax.tick_params(colors="#CBD5E1", labelsize=8.5)
-    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-    ax.grid(True, linestyle=":", color="#334155", alpha=0.6)
+    sym_code, q5y, turns, ccy, is_lev = data["turns_map"][selected_target]
+    px_prefix = "$" if ccy == "USD" else "NT$"
 
-    legend_elements = [
-        Line2D([0], [0], color="#F8FAFC", lw=2.2, label="Weekly Close"),
-        Line2D([0], [0], color="#94A3B8", lw=1.2, ls="--", label="20W MA"),
-        Patch(facecolor="#10B981", alpha=0.28, label="Bullish / Active"),
-        Patch(facecolor="#F59E0B", alpha=0.22, label="Buffer / Cooling"),
-        Patch(facecolor="#3B82F6", alpha=0.30, label="Defense / Pullback"),
-    ]
-    ax.legend(handles=legend_elements, loc="upper left", facecolor="#1E293B", edgecolor="#475569", labelcolor="#F8FAFC", fontsize=7.8)
-    plt.tight_layout()
-    st.pyplot(fig, use_container_width=True)
+    fig = go.Figure()
+
+    # 繪製背景區間色塊（依漸進目標正二比例著色）
+    shapes = []
+    if len(q5y) > 1:
+        seg_start = q5y.index[0]
+        seg_val = q5y["t2x"].iloc[0]
+        for i in range(1, len(q5y)):
+            cur_val = q5y["t2x"].iloc[i]
+            if abs(cur_val - seg_val) > 1e-6 or i == len(q5y) - 1:
+                seg_end = q5y.index[i]
+                if seg_val >= 0.70:
+                    fill_c = "rgba(16, 185, 129, 0.14)"   # 偏多積極區 (70%~100%)
+                elif seg_val <= 0.30:
+                    fill_c = "rgba(59, 130, 246, 0.18)"   # 偏空防禦區 (0%~30%)
+                else:
+                    fill_c = "rgba(245, 158, 11, 0.11)"   # 中性緩衝區 (40%~60%)
+                shapes.append(dict(
+                    type="rect", xref="x", yref="paper",
+                    x0=seg_start, x1=seg_end, y0=0, y1=1,
+                    fillcolor=fill_c, line=dict(width=0), layer="below"
+                ))
+                seg_start = seg_end
+                seg_val = cur_val
+
+    # 準備每一週游標懸停（Hover）的完整策略資訊
+    hover_custom = np.stack([
+        q5y["z20w"].map(lambda v: f"{v:+.2f}" if pd.notna(v) else "N/A"),
+        q5y["z20m"].map(lambda v: f"{v:+.2f}" if pd.notna(v) else "N/A"),
+        q5y["score"].map(lambda v: f"{v:+.2f}" if pd.notna(v) else "N/A"),
+        q5y["t2x"].map(lambda v: f"原型 {(1-v)*100:.0f}% / 正二 {v*100:.0f}%" if is_lev else f"衛星檔位 {v*100:.0f}%"),
+        q5y["raw_t2x"].map(lambda v: f"正二 {v*100:.0f}%" if is_lev else f"理想檔位 {v*100:.0f}%")
+    ], axis=-1)
+
+    fig.add_trace(go.Scatter(
+        x=q5y.index, y=q5y["px"],
+        mode="lines", name="Weekly Close (週收盤)",
+        line=dict(color="#F8FAFC", width=2.1),
+        customdata=hover_custom,
+        hovertemplate=(
+            "<b>%{x|%Y-%m-%d}</b><br>"
+            "週收盤價: " + px_prefix + "%{y:.2f}<br>"
+            "20週 Z值: %{customdata[0]} ｜ 20月 Z值: %{customdata[1]}<br>"
+            "綜合積分 S: <b>%{customdata[2]}</b><br>"
+            "當期步進目標: <b>%{customdata[3]}</b>（終極理想: %{customdata[4]}）"
+            "<extra></extra>"
+        )
+    ))
+    fig.add_trace(go.Scatter(
+        x=q5y.index, y=q5y["ma20w"],
+        mode="lines", name="20W MA (20週均線)",
+        line=dict(color="#94A3B8", width=1.2, dash="dash"),
+        hovertemplate="20週均線: " + px_prefix + "%{y:.2f}<extra></extra>"
+    ))
+
+    # 標示單次 ±10% 調整轉折點（調升正二 vs. 調降正二）
+    up_turns = turns[turns["t2x"] > turns["prev_t2x"]]
+    dn_turns = turns[turns["t2x"] < turns["prev_t2x"]]
+
+    for label_grp, sub_t, m_col, m_sym in [
+        ("調升正二 (+10%)", up_turns, "#22C55E", "triangle-up"),
+        ("調降正二 (-10%)", dn_turns, "#EF4444", "triangle-down"),
+    ]:
+        if len(sub_t) > 0:
+            t_custom = np.stack([
+                sub_t["score"].map(lambda v: f"{v:+.2f}"),
+                sub_t["prev_t2x"].map(lambda v: f"{v*100:.0f}%"),
+                sub_t["t2x"].map(lambda v: f"{v*100:.0f}%"),
+                sub_t["cum_ret"],
+                sub_t["ann_ret"],
+            ], axis=-1)
+            fig.add_trace(go.Scatter(
+                x=sub_t.index, y=sub_t["px"],
+                mode="markers", name=label_grp,
+                marker=dict(color=m_col, symbol=m_sym, size=9, line=dict(color="#FFFFFF", width=1.0)),
+                customdata=t_custom,
+                hovertemplate=(
+                    "<b>【轉折點】%{x|%Y-%m-%d}</b><br>"
+                    "轉折價: " + px_prefix + "%{y:.2f} ｜ 積分 S: %{customdata[0]}<br>"
+                    "目標變化: <b>%{customdata[1]} → %{customdata[2]}</b><br>"
+                    "至今累積: %{customdata[3]} ｜ 年化: %{customdata[4]}"
+                    "<extra></extra>"
+                )
+            ))
+
+    end_dt = q5y.index[-1]
+    if zoom_range == "近 3 年走勢":
+        start_dt = end_dt - pd.Timedelta(days=365 * 3)
+    elif zoom_range == "近 1 年走勢":
+        start_dt = end_dt - pd.Timedelta(days=365)
+    elif zoom_range == "近 6 個月走勢":
+        start_dt = end_dt - pd.Timedelta(days=182)
+    else:
+        start_dt = q5y.index[0]
+
+    fig.update_layout(
+        title=dict(
+            text=f"{sym_code} — 5-Year Weekly Trend & ±10% Step Rotation (Hover & Zoom)",
+            font=dict(size=15, color="#F8FAFC"), x=0.5, xanchor="center"
+        ),
+        paper_bgcolor="#111827",
+        plot_bgcolor="#0F172A",
+        font=dict(color="#CBD5E1"),
+        height=480,
+        margin=dict(l=45, r=20, t=54, b=35),
+        shapes=shapes,
+        hovermode="x unified",
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0.0,
+            bgcolor="rgba(30,41,59,0.75)", font=dict(size=11)
+        ),
+        xaxis=dict(
+            range=[start_dt, end_dt],
+            gridcolor="rgba(51,65,85,0.5)",
+            rangeslider=dict(visible=True, thickness=0.07, bgcolor="#1E293B"),
+            type="date"
+        ),
+        yaxis=dict(
+            title=f"Price ({ccy})",
+            gridcolor="rgba(51,65,85,0.5)",
+            fixedrange=False
+        )
+    )
+
+    st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True, "displayModeBar": True})
 
     if len(turns) > 0:
+        turns_sorted = turns.sort_index(ascending=False)
         rows_disp = []
-        for dt, r in turns.iterrows():
+        for dt, r in turns_sorted.iterrows():
+            delta_pct = (r["t2x"] - r["prev_t2x"]) * 100.0
             if is_lev:
                 prev_lbl = f"{r['prev_t2x']*100:.0f}% 2x"
                 curr_lbl = f"{r['t2x']*100:.0f}% 2x"
-                if r["t2x"] <= 0.01:
-                    action_hint = "正二轉回 1x 原型（空頭防禦）"
-                elif r["t2x"] >= 0.99:
-                    action_hint = "切回 2x 槓桿（多頭主升段）"
+                if delta_pct < 0:
+                    action_hint = f"減碼正二 10% → 轉入原型（終極理想 {r['raw_t2x']*100:.0f}% 2x）"
                 else:
-                    action_hint = "調整至 50% 正二緩衝區"
+                    action_hint = f"加碼正二 10% ← 原型轉入（終極理想 {r['raw_t2x']*100:.0f}% 2x）"
             else:
                 prev_lbl = f"檔位 {r['prev_t2x']*100:.0f}%"
                 curr_lbl = f"檔位 {r['t2x']*100:.0f}%"
-                if r["t2x"] <= 0.01:
-                    action_hint = "費半修正中：嚴控比例、不猜底"
-                elif r["t2x"] >= 0.99:
-                    action_hint = "費半正常區間：依紀律配置"
-                else:
-                    action_hint = "費半過熱降溫：暫緩追高"
+                action_hint = f"單次調整 10% 檔位（理想檔位 {r['raw_t2x']*100:.0f}%）"
 
             rows_disp.append({
                 "轉折日期": dt.strftime("%Y-%m-%d"),
                 "週收盤價": f"{px_prefix}{r['px']:.2f}",
                 "綜合積分 S": f"{r['score']:+.2f}",
-                "目標變化": f"{prev_lbl} → {curr_lbl}",
+                "單次目標變化 (±10%)": f"{prev_lbl} → {curr_lbl}",
                 "至今累積報酬": r["cum_ret"],
                 "折合年化報酬": r["ann_ret"],
                 "對應操作方向": action_hint,
             })
         st.dataframe(pd.DataFrame(rows_disp), use_container_width=True, hide_index=True)
-        st.caption("註：累積報酬與折合年化報酬皆以該轉折點週收盤至最新週收盤計算（未滿 3 週不強行折算年化，避免短期間放大誤差）。")
+        st.caption("註：圖表涵蓋過去 5 年周線資料，游標移動至任意週次皆可檢視當週股價、Z值積分、當期目標比例與年化報酬。")
     else:
-        st.info("近一年內未發生跨區間轉折切換。")
+        st.info("近五年內未發生目標切換。")
 
 st.caption("🛡️ 紀律提醒：條件觸發照表操課、不猜高低點；調整完畢即可安心蓋牌過生活，並確保生活緊急預備金與投資／槓桿資金獨立切分。")
