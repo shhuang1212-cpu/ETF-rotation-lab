@@ -210,22 +210,29 @@ def build_5y_weekly_turns(ticker, w_week, w_month):
         p0 = float(r["px"])
         yr = int(dt.year)
 
-        # 五年累積報酬：自轉折點起算至「5 年後」或「最新週收盤」
-        target_5y_dt = min(dt + pd.Timedelta(days=365 * 5), latest_dt)
-        idx_5y = w_5y.index.get_indexer([target_5y_dt], method="pad")[0]
-        p_5y = float(w_5y["px"].iloc[max(0, idx_5y)])
-        cum_5y = (p_5y / p0 - 1.0) * 100.0 if p0 > 0 else 0.0
-        five_yr_rets.append(f"{cum_5y:+.1f}%")
+        # 五年累積報酬：若已滿 5 年則算完整 5 年區間報酬；未滿 5 年則標示「未滿5年」並附至今累積
+        ideal_5y_dt = dt + pd.Timedelta(days=365 * 5)
+        now_ret = (latest_px / p0 - 1.0) * 100.0 if p0 > 0 else 0.0
+        if ideal_5y_dt <= latest_dt and p0 > 0:
+            idx_5y = w_5y.index.get_indexer([ideal_5y_dt], method="pad")[0]
+            p_5y = float(w_5y["px"].iloc[max(0, idx_5y)])
+            cum_5y = (p_5y / p0 - 1.0) * 100.0
+            five_yr_rets.append(f"{cum_5y:+.1f}% (5年)")
+        else:
+            five_yr_rets.append(f"未滿5年 (至今 {now_ret:+.1f}%)")
 
-        # 當年年化報酬：自轉折點起算至該年年底（若為當年度則至最新週收盤）
+        # 當年年化報酬：經過天數 >= 45 天才折算年化，避免短天數分母過小導致極端值爆炸
         yr_end_dt = w_5y[w_5y["year"] == yr].index[-1]
         p_yr_end = float(yr_last_map.get(yr, latest_px))
         days_in_yr = max(1, (yr_end_dt - dt).days)
-        if p0 > 0 and p_yr_end > 0:
+        simple_yr_ret = (p_yr_end / p0 - 1.0) * 100.0 if p0 > 0 else 0.0
+        if days_in_yr >= 45 and p0 > 0 and p_yr_end > 0:
             yr_ann = ((p_yr_end / p0) ** (365.25 / days_in_yr) - 1.0) * 100.0
+            # 防呆夾限，避免極端短期波動出現誇張數字
+            yr_ann = max(-99.0, min(500.0, yr_ann))
             curr_yr_ann_rets.append(f"{yr_ann:+.1f}% ({yr}年化)")
         else:
-            curr_yr_ann_rets.append(f"0.0% ({yr}年化)")
+            curr_yr_ann_rets.append(f"{simple_yr_ret:+.1f}% ({days_in_yr}天當期)")
 
     turns["five_yr_ret"] = five_yr_rets
     turns["curr_yr_ann"] = curr_yr_ann_rets
@@ -818,7 +825,7 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬�
                 "對應操作方向": action_hint,
             })
         st.dataframe(pd.DataFrame(rows_disp), use_container_width=True, hide_index=True)
-        st.caption("註：五年累積報酬以轉折日起算至 5 年後或最新週收盤；當年年化報酬以轉折日起算至該年年底依實際天數折算。")
+        st.caption("註：已滿 5 年轉折點顯示完整 5 年累積報酬，未滿 5 年則標示至今累積；當年年化報酬於經過天數 >= 45 天才折算年化，避免短期間放大誤差。")
     else:
         st.info("近五年內未發生目標切換。")
 
