@@ -194,6 +194,23 @@ def build_5y_weekly_turns(ticker, w_week, w_month):
     w_df["raw_t2x"] = raw_list
     w_df["t2x"] = apply_step_cap(raw_list, MAX_STEP_2X)
 
+    # 計算 00865B 每次 5% 收割（S >= 1.5，上限 20%）與 5% 補原型（S <= -1.0，保留 5% 底倉）歷史事件
+    cur_bw = 0.20
+    bw_list = []
+    act_list = []
+    for s in w_df["score"]:
+        if pd.notna(s) and s >= 1.5 and cur_bw < BOND_CAP - 1e-6:
+            cur_bw = min(BOND_CAP, round(cur_bw + BOND_STEP, 4))
+            act_list.append("HARVEST_5")
+        elif pd.notna(s) and s <= -1.0 and cur_bw > BOND_FLOOR + 1e-6:
+            cur_bw = max(BOND_FLOOR, round(cur_bw - BOND_STEP, 4))
+            act_list.append("DIP_5")
+        else:
+            act_list.append("NONE")
+        bw_list.append(cur_bw)
+    w_df["bond_w"] = bw_list
+    w_df["bond_act"] = act_list
+
     cutoff = w_df.index[-1] - pd.Timedelta(days=365 * 5)
     w_5y = w_df[w_df.index >= cutoff].copy()
     w_5y["prev_t2x"] = w_5y["t2x"].shift(1)
@@ -210,7 +227,7 @@ def build_5y_weekly_turns(ticker, w_week, w_month):
 
         if start_px > 0 and p_node > 0:
             cum_ret = (p_node / start_px - 1.0) * 100.0
-            val_100w = 100.0 * (p_node / start_px)  # 以 100 萬為基準（單位：萬元）
+            val_100w = 100.0 * (p_node / start_px)
             five_yr_rets.append(f"{cum_ret:+.1f}% (100萬→{val_100w:.1f}萬)")
 
             if days_from_start >= 21:
@@ -650,8 +667,8 @@ with st.expander("📋 查看方案 A 本週精確買賣股數建議", expanded=
     _pool_action("台股核心池 (0050/00685L)", s_0050, tw_p1, tw_v1, s_685l, tw_p2, tw_v2, tw_step_2x, tw_ideal_2x)
     _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670l, us_p2, us_v2, us_step_2x, us_ideal_2x)
 
-# ================= 過去五年周線輪轉互動式趨勢圖 =================
-with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬明細（以圖內第1天 100 萬起算）", expanded=True):
+# ================= 過去五年周線輪轉互動式趨勢圖（含 00865B 5% 收割/補原型點位） =================
+with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬明細（含 00865B 5% 策略點位）", expanded=True):
     col_sel1, col_sel2 = st.columns([3, 2])
     with col_sel1:
         selected_target = st.radio(
@@ -698,7 +715,7 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬�
         q5y["z20m"].map(lambda v: f"{v:+.2f}" if pd.notna(v) else "N/A"),
         q5y["score"].map(lambda v: f"{v:+.2f}" if pd.notna(v) else "N/A"),
         q5y["t2x"].map(lambda v: f"原型 {(1-v)*100:.0f}% / 正二 {v*100:.0f}%"),
-        q5y["raw_t2x"].map(lambda v: f"正二 {v*100:.0f}%")
+        q5y["bond_w"].map(lambda v: f"{v*100:.0f}%")
     ], axis=-1)
 
     fig.add_trace(go.Scatter(
@@ -711,7 +728,7 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬�
             "週收盤價: " + px_prefix + "%{y:.2f}<br>"
             "20週 Z值: %{customdata[0]} ｜ 20月 Z值: %{customdata[1]}<br>"
             "綜合積分 S: <b>%{customdata[2]}</b><br>"
-            "當期步進目標: <b>%{customdata[3]}</b>（終極理想: %{customdata[4]}）"
+            "正二步進: <b>%{customdata[3]}</b> ｜ 00865B 水位: <b>%{customdata[4]}</b>"
             "<extra></extra>"
         )
     ))
@@ -743,13 +760,43 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬�
                 marker=dict(color=m_col, symbol=m_sym, size=9, line=dict(color="#FFFFFF", width=1.0)),
                 customdata=t_custom,
                 hovertemplate=(
-                    "<b>【轉折點】%{x|%Y-%m-%d}</b><br>"
+                    "<b>【正二轉折】%{x|%Y-%m-%d}</b><br>"
                     "轉折價: " + px_prefix + "%{y:.2f} ｜ 積分 S: %{customdata[0]}<br>"
                     "目標變化: <b>%{customdata[1]} → %{customdata[2]}</b><br>"
                     "五年累積(100萬起): %{customdata[3]} ｜ 年化: %{customdata[4]}"
                     "<extra></extra>"
                 )
             ))
+
+    # 疊加 00865B 每次 5% 收割（轉短債）與 5% 補原型（動用短債）點位
+    b_harvest = q5y[q5y["bond_act"] == "HARVEST_5"]
+    b_dip = q5y[q5y["bond_act"] == "DIP_5"]
+
+    if len(b_harvest) > 0:
+        fig.add_trace(go.Scatter(
+            x=b_harvest.index, y=b_harvest["px"],
+            mode="markers", name="00865B 收割 (+5% 轉短債)",
+            marker=dict(color="#34D399", symbol="diamond", size=9, line=dict(color="#FFFFFF", width=1.0)),
+            customdata=b_harvest["bond_w"].map(lambda v: f"{v*100:.0f}%"),
+            hovertemplate=(
+                "<b>【00865B 收割 +5%】%{x|%Y-%m-%d}</b><br>"
+                "當週股價: " + px_prefix + "%{y:.2f} ｜ 短債水位升至 <b>%{customdata}</b>"
+                "<extra></extra>"
+            )
+        ))
+
+    if len(b_dip) > 0:
+        fig.add_trace(go.Scatter(
+            x=b_dip.index, y=b_dip["px"],
+            mode="markers", name="00865B 補原型 (-5% 動用短債)",
+            marker=dict(color="#60A5FA", symbol="diamond", size=9, line=dict(color="#FFFFFF", width=1.0)),
+            customdata=b_dip["bond_w"].map(lambda v: f"{v*100:.0f}%"),
+            hovertemplate=(
+                "<b>【00865B 補原型 -5%】%{x|%Y-%m-%d}</b><br>"
+                "當週股價: " + px_prefix + "%{y:.2f} ｜ 短債水位降至 <b>%{customdata}</b>"
+                "<extra></extra>"
+            )
+        ))
 
     end_dt = q5y.index[-1]
     if zoom_range == "近 3 年走勢":
@@ -763,13 +810,13 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬�
 
     fig.update_layout(
         title=dict(
-            text=f"{sym_code} — 5-Year Weekly Trend & ±10% Step Rotation (Plan A)",
+            text=f"{sym_code} — 5-Year Weekly Trend, ±10% Step & 00865B (±5%)",
             font=dict(size=15, color="#F8FAFC"), x=0.5, xanchor="center"
         ),
         paper_bgcolor="#111827",
         plot_bgcolor="#0F172A",
         font=dict(color="#CBD5E1"),
-        height=480,
+        height=490,
         margin=dict(l=45, r=20, t=54, b=35),
         shapes=shapes,
         hovermode="x unified",
@@ -814,7 +861,7 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬�
                 "對應操作方向": action_hint,
             })
         st.dataframe(pd.DataFrame(rows_disp), use_container_width=True, hide_index=True)
-        st.caption(f"註：以五年圖第一天（{q5y.index[0].strftime('%Y-%m-%d')}，收盤價 {px_prefix}{q5y['px'].iloc[0]:.2f}）投入 100 萬為起點，計算至各轉折點之累積報酬率與年化報酬率。")
+        st.caption(f"註：以五年圖第一天（{q5y.index[0].strftime('%Y-%m-%d')}，收盤價 {px_prefix}{q5y['px'].iloc[0]:.2f}）投入 100 萬為起點計算至各轉折點；菱形點位代表 00865B 每次 5% 收割（上限 20%）或 5% 補原型（保留 5% 底倉）。")
     else:
         st.info("近五年內未發生目標切換。")
 
