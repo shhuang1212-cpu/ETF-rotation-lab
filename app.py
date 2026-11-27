@@ -199,40 +199,29 @@ def build_5y_weekly_turns(ticker, w_week, w_month):
     w_5y["prev_t2x"] = w_5y["t2x"].shift(1)
     turns = w_5y[(w_5y["prev_t2x"].notna()) & ((w_5y["t2x"] - w_5y["prev_t2x"]).abs() > 1e-6)].copy()
 
-    latest_dt = w_5y.index[-1]
-    latest_px = float(w_5y["px"].iloc[-1])
-
-    w_5y["year"] = w_5y.index.year
-    yr_last_map = w_5y.groupby("year")["px"].last().to_dict()
+    # 以「五年圖第一天」投入 100 萬為基準，計算到每一個轉折點的累積報酬率與年化報酬率
+    start_dt = w_5y.index[0]
+    start_px = float(w_5y["px"].iloc[0])
 
     five_yr_rets, curr_yr_ann_rets = [], []
     for dt, r in turns.iterrows():
-        p0 = float(r["px"])
-        yr = int(dt.year)
+        p_node = float(r["px"])
+        days_from_start = max(1, (dt - start_dt).days)
 
-        # 五年累積報酬：若已滿 5 年則算完整 5 年區間報酬；未滿 5 年則標示「未滿5年」並附至今累積
-        ideal_5y_dt = dt + pd.Timedelta(days=365 * 5)
-        now_ret = (latest_px / p0 - 1.0) * 100.0 if p0 > 0 else 0.0
-        if ideal_5y_dt <= latest_dt and p0 > 0:
-            idx_5y = w_5y.index.get_indexer([ideal_5y_dt], method="pad")[0]
-            p_5y = float(w_5y["px"].iloc[max(0, idx_5y)])
-            cum_5y = (p_5y / p0 - 1.0) * 100.0
-            five_yr_rets.append(f"{cum_5y:+.1f}% (5年)")
-        else:
-            five_yr_rets.append(f"未滿5年 (至今 {now_ret:+.1f}%)")
+        if start_px > 0 and p_node > 0:
+            cum_ret = (p_node / start_px - 1.0) * 100.0
+            val_100w = 100.0 * (p_node / start_px)  # 以 100 萬為基準（單位：萬元）
+            five_yr_rets.append(f"{cum_ret:+.1f}% (100萬→{val_100w:.1f}萬)")
 
-        # 當年年化報酬：經過天數 >= 45 天才折算年化，避免短天數分母過小導致極端值爆炸
-        yr_end_dt = w_5y[w_5y["year"] == yr].index[-1]
-        p_yr_end = float(yr_last_map.get(yr, latest_px))
-        days_in_yr = max(1, (yr_end_dt - dt).days)
-        simple_yr_ret = (p_yr_end / p0 - 1.0) * 100.0 if p0 > 0 else 0.0
-        if days_in_yr >= 45 and p0 > 0 and p_yr_end > 0:
-            yr_ann = ((p_yr_end / p0) ** (365.25 / days_in_yr) - 1.0) * 100.0
-            # 防呆夾限，避免極端短期波動出現誇張數字
-            yr_ann = max(-99.0, min(500.0, yr_ann))
-            curr_yr_ann_rets.append(f"{yr_ann:+.1f}% ({yr}年化)")
+            if days_from_start >= 21:
+                ann_ret = ((p_node / start_px) ** (365.25 / days_from_start) - 1.0) * 100.0
+                ann_ret = max(-99.0, min(500.0, ann_ret))
+                curr_yr_ann_rets.append(f"{ann_ret:+.1f}% ({days_from_start}天年化)")
+            else:
+                curr_yr_ann_rets.append(f"{cum_ret:+.1f}% ({days_from_start}天累計)")
         else:
-            curr_yr_ann_rets.append(f"{simple_yr_ret:+.1f}% ({days_in_yr}天當期)")
+            five_yr_rets.append("N/A")
+            curr_yr_ann_rets.append("N/A")
 
     turns["five_yr_ret"] = five_yr_rets
     turns["curr_yr_ann"] = curr_yr_ann_rets
@@ -662,7 +651,7 @@ with st.expander("📋 查看方案 A 本週精確買賣股數建議", expanded=
     _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670l, us_p2, us_v2, us_step_2x, us_ideal_2x)
 
 # ================= 過去五年周線輪轉互動式趨勢圖 =================
-with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬明細（單次上限 ±10%）", expanded=True):
+with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬明細（以圖內第1天 100 萬起算）", expanded=True):
     col_sel1, col_sel2 = st.columns([3, 2])
     with col_sel1:
         selected_target = st.radio(
@@ -757,7 +746,7 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬�
                     "<b>【轉折點】%{x|%Y-%m-%d}</b><br>"
                     "轉折價: " + px_prefix + "%{y:.2f} ｜ 積分 S: %{customdata[0]}<br>"
                     "目標變化: <b>%{customdata[1]} → %{customdata[2]}</b><br>"
-                    "五年累積: %{customdata[3]} ｜ 當年年化: %{customdata[4]}"
+                    "五年累積(100萬起): %{customdata[3]} ｜ 年化: %{customdata[4]}"
                     "<extra></extra>"
                 )
             ))
@@ -825,7 +814,7 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬�
                 "對應操作方向": action_hint,
             })
         st.dataframe(pd.DataFrame(rows_disp), use_container_width=True, hide_index=True)
-        st.caption("註：已滿 5 年轉折點顯示完整 5 年累積報酬，未滿 5 年則標示至今累積；當年年化報酬於經過天數 >= 45 天才折算年化，避免短期間放大誤差。")
+        st.caption(f"註：以五年圖第一天（{q5y.index[0].strftime('%Y-%m-%d')}，收盤價 {px_prefix}{q5y['px'].iloc[0]:.2f}）投入 100 萬為起點，計算至各轉折點之累積報酬率與年化報酬率。")
     else:
         st.info("近五年內未發生目標切換。")
 
