@@ -7,6 +7,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="ETF 持股輪動 LAB · 方案 A", page_icon="📊", layout="wide")
 
@@ -130,8 +131,13 @@ MAX_STEP_2X = 0.10
 BOND_STEP = 0.05
 BOND_CAP = 0.20
 BOND_FLOOR = 0.05
-HARVEST_S_TH = 2.0   # 延後至 S >= +2.0 才收割 5% 入 00865B，讓多頭主升段多跑一段
-DIP_S_TH = -1.0      # S <= -1.0 動用 5% 00865B 補買原型
+HARVEST_S_TH = 2.0
+DIP_S_TH = -1.0
+
+# 預設初始資金：台股 100 萬 / 美股 100 萬 / 短債 50 萬（合計 250 萬）
+INIT_TW_TWD   = 1_000_000.0
+INIT_US_TWD   = 1_000_000.0
+INIT_BOND_TWD =   500_000.0
 
 def calc_z_and_score(close_series, w_week, w_month):
     close = close_series.dropna().copy()
@@ -196,7 +202,6 @@ def build_5y_weekly_turns(ticker, w_week, w_month):
     w_df["raw_t2x"] = raw_list
     w_df["t2x"] = apply_step_cap(raw_list, MAX_STEP_2X)
 
-    # 延後至 S >= +2.0 收割 5%（上限 20%）；S <= -1.0 補原型 5%（保留 5% 底倉）
     cur_bw = 0.20
     bw_list = []
     act_list = []
@@ -228,8 +233,8 @@ def build_5y_weekly_turns(ticker, w_week, w_month):
 
         if start_px > 0 and p_node > 0:
             cum_ret = (p_node / start_px - 1.0) * 100.0
-            val_100w = 100.0 * (p_node / start_px)
-            five_yr_rets.append(f"{cum_ret:+.1f}% (100萬→{val_100w:.1f}萬)")
+            val_250w = 250.0 * (p_node / start_px)
+            five_yr_rets.append(f"{cum_ret:+.1f}% (250萬→{val_250w:.1f}萬)")
 
             if days_from_start >= 21:
                 ann_ret = ((p_node / start_px) ** (365.25 / days_from_start) - 1.0) * 100.0
@@ -244,6 +249,70 @@ def build_5y_weekly_turns(ticker, w_week, w_month):
     turns["five_yr_ret"] = five_yr_rets
     turns["curr_yr_ann"] = curr_yr_ann_rets
     return w_5y, turns
+
+def build_weekly_asset_paths(tw_w5y, us_w5y, init_tw_wan=100.0, init_us_wan=100.0, init_bond_wan=50.0):
+    """依五年週線走勢模擬每週 1.總資產、2.台股(0050+00685L)、3.美股(00662+00670L)、4.短債(00865B) 變化"""
+    common_idx = tw_w5y.index.intersection(us_w5y.index)
+    if len(common_idx) < 5:
+        common_idx = tw_w5y.index
+
+    tw_px = tw_w5y["px"].reindex(common_idx).ffill()
+    us_px = us_w5y["px"].reindex(common_idx).ffill()
+    tw_sc = tw_w5y["score"].reindex(common_idx).ffill().fillna(0.0)
+    us_sc = us_w5y["score"].reindex(common_idx).ffill().fillna(0.0)
+
+    r_tw_1x = tw_px.pct_change().fillna(0.0)
+    r_us_1x = us_px.pct_change().fillna(0.0)
+    r_tw_2x = (2.0 * r_tw_1x - (0.024 / 52.0) - (r_tw_1x ** 2)).clip(-0.45, 0.45)
+    r_us_2x = (2.0 * r_us_1x - (0.024 / 52.0) - (r_us_1x ** 2)).clip(-0.45, 0.45)
+    r_bond  = (0.036 / 52.0)
+
+    tw_1 = init_tw_wan * 0.50
+    tw_2 = init_tw_wan * 0.50
+    us_1 = init_us_wan * 0.50
+    us_2 = init_us_wan * 0.50
+    bond_v = init_bond_wan
+
+    recs = []
+    for idx_i, dt in enumerate(common_idx):
+        if idx_i > 0:
+            tw_1 *= (1.0 + float(r_tw_1x.iloc[idx_i]))
+            tw_2 *= (1.0 + float(r_tw_2x.iloc[idx_i]))
+            us_1 *= (1.0 + float(r_us_1x.iloc[idx_i]))
+            us_2 *= (1.0 + float(r_us_2x.iloc[idx_i]))
+            bond_v *= (1.0 + float(r_bond))
+
+        sc = 0.5 * float(tw_sc.iloc[idx_i]) + 0.5 * float(us_sc.iloc[idx_i])
+        tot = tw_1 + tw_2 + us_1 + us_2 + bond_v
+        cur_b = (bond_v / tot) if tot > 0 else 0.0
+
+        if sc >= HARVEST_S_TH and cur_b < BOND_CAP - 1e-6:
+            step = min(BOND_STEP, BOND_CAP - cur_b)
+            amt = min((tw_2 + us_2) * 0.4, step * tot)
+            if amt > 0 and (tw_2 + us_2) > 0:
+                share_tw = tw_2 / (tw_2 + us_2)
+                tw_2 -= amt * share_tw
+                us_2 -= amt * (1.0 - share_tw)
+                bond_v += amt
+        elif sc <= DIP_S_TH and cur_b > BOND_FLOOR + 1e-6:
+            step = min(BOND_STEP, cur_b - BOND_FLOOR)
+            amt = min(bond_v, step * tot)
+            if amt > 0:
+                bond_v -= amt
+                tw_1 += amt * 0.5
+                us_1 += amt * 0.5
+
+        tot_now = tw_1 + tw_2 + us_1 + us_2 + bond_v
+        recs.append({
+            "date": dt,
+            "week_label": f"第{idx_i + 1}週 ({dt.strftime('%Y-%m-%d')})",
+            "total": round(tot_now, 2),
+            "tw": round(tw_1 + tw_2, 2),
+            "us": round(us_1 + us_2, 2),
+            "bond": round(bond_v, 2),
+        })
+
+    return pd.DataFrame(recs)
 
 @st.cache_data(ttl=600)
 def fetch_market_data():
@@ -293,6 +362,8 @@ def fetch_market_data():
         "p_685l": _latest("00685L.TW"),
         "p_670l": _latest("00670L.TW"),
         "p_865b": _latest("00865B.TW"),
+        "tw_5y": tw_5y,
+        "qqq_5y": qqq_5y,
         "turns_map": {
             "美股 QQQ (對應 00662/00670L)": ("QQQ", qqq_5y, qqq_turns, "USD"),
             "台股 0050 (對應 0050/00685L)": ("0050.TW", tw_5y, tw_turns, "TWD"),
@@ -397,7 +468,7 @@ with col_t:
     <div class="lab-header">
         <span class="lab-title">ETF 持股輪動 LAB</span>
         <span class="lab-sub">雙週期共振 · 單次上限 ±10%</span>
-        <span class="lab-badge">方案 A：40 / 40 / 20(S≥+2.0收割)</span>
+        <span class="lab-badge">方案 A：台股100萬 / 美股100萬 / 短債50萬</span>
     </div>
     """)
 with col_b:
@@ -407,21 +478,28 @@ with col_b:
 with st.spinner("正在抓取五檔最新還原權息報價與近五年周線轉折..."):
     data = fetch_market_data()
 
-with st.expander("📝 輸入／修改目前五檔持股與資金（預設為範例庫存，請依實際股數調整）", expanded=False):
-    c1, c2, c3, c4 = st.columns(4)
-    s_0050 = c1.number_input("0050 股數", min_value=0, value=1000, step=100)
-    s_685l = c2.number_input("00685L 股數 (台股正2)", min_value=0, value=2000, step=100)
-    s_662  = c3.number_input("00662 股數", min_value=0, value=2000, step=100)
-    s_670l = c4.number_input("00670L 股數 (美股正2)", min_value=0, value=500, step=100)
-    c5, c6, c7, c8 = st.columns(4)
-    s_865b   = c5.number_input("00865B 股數 (短債緩衝池)", min_value=0, value=2000, step=100)
-    cash_bal = c6.number_input("額外可用現金 (元)", min_value=0, value=10000, step=1000)
-    ext_debt = c7.number_input("外部借款 (元)", min_value=0, value=0, step=10000)
-    _        = c8.empty()
-
 tw_p1, tw_p2 = data["TW"]["price"], data["p_685l"]
 us_p1, us_p2 = data["US"]["price"], data["p_670l"]
 bond_p       = data["p_865b"]
+
+# 依「台股 100 萬 / 美股 100 萬 / 短債 50 萬」自動換算預設股數
+def_0050 = int(round((INIT_TW_TWD * 0.50) / tw_p1)) if tw_p1 > 0 else 5000
+def_685l = int(round((INIT_TW_TWD * 0.50) / tw_p2)) if tw_p2 > 0 else 5000
+def_662  = int(round((INIT_US_TWD * 0.50) / us_p1)) if us_p1 > 0 else 5000
+def_670l = int(round((INIT_US_TWD * 0.50) / us_p2)) if us_p2 > 0 else 3000
+def_865b = int(round(INIT_BOND_TWD / bond_p)) if bond_p > 0 else 11000
+
+with st.expander("📝 輸入／修改目前五檔持股與資金（預設對齊 台股100萬 / 美股100萬 / 短債50萬）", expanded=False):
+    c1, c2, c3, c4 = st.columns(4)
+    s_0050 = c1.number_input("0050 股數", min_value=0, value=def_0050, step=100)
+    s_685l = c2.number_input("00685L 股數 (台股正2)", min_value=0, value=def_685l, step=100)
+    s_662  = c3.number_input("00662 股數", min_value=0, value=def_662, step=100)
+    s_670l = c4.number_input("00670L 股數 (美股正2)", min_value=0, value=def_670l, step=100)
+    c5, c6, c7, c8 = st.columns(4)
+    s_865b   = c5.number_input("00865B 股數 (短債緩衝池)", min_value=0, value=def_865b, step=100)
+    cash_bal = c6.number_input("額外可用現金 (元)", min_value=0, value=0, step=1000)
+    ext_debt = c7.number_input("外部借款 (元)", min_value=0, value=0, step=10000)
+    _        = c8.empty()
 
 tw_v1, tw_v2 = s_0050 * tw_p1, s_685l * tw_p2
 us_v1, us_v2 = s_662 * us_p1, s_670l * us_p2
@@ -495,7 +573,7 @@ real_lev  = total_exp / net_asset
 cards = [
     {
         "title": "台股核心池 (40%)",
-        "sub": f"0050 ({tw_p1:.2f}) / 00685L ({tw_p2:.2f}) · S={tw_score:+.2f}",
+        "sub": f"市值 {(tw_v1+tw_v2)/10000:.1f}萬 · 0050/00685L · S={tw_score:+.2f}",
         "cur": tw_cur_pct, "sug": tw_sug_pct,
         "zw": data["TW"]["z_20w"], "zm": data["TW"]["z_20m"],
         "color": "#34D399" if abs(tw_cur_pct - tw_sug_pct) <= 10 else "#FBBF24",
@@ -507,7 +585,7 @@ cards = [
     },
     {
         "title": "美股核心池 (40%)",
-        "sub": f"00662 ({us_p1:.2f}) / 00670L ({us_p2:.2f}) · S={us_score:+.2f}",
+        "sub": f"市值 {(us_v1+us_v2)/10000:.1f}萬 · 00662/00670L · S={us_score:+.2f}",
         "cur": us_cur_pct, "sug": us_sug_pct,
         "zw": data["US"]["z_20w"], "zm": data["US"]["z_20m"],
         "color": "#60A5FA" if data["US"]["used_fallback"] else "#34D399",
@@ -519,7 +597,7 @@ cards = [
     },
     {
         "title": "短債緩衝池 (上限20%)",
-        "sub": f"00865B ({bond_p:.2f}) · 已用 {bond_cur_pct:.1f}% / 20%",
+        "sub": f"市值 {bond_v/10000:.1f}萬 · 已用 {bond_cur_pct:.1f}% / 20%",
         "cur": min(100.0, (bond_cur_pct / 20.0) * 100.0), "sug": bond_sug_pct,
         "zw": tw_score, "zm": us_score,
         "color": "#34D399" if bond_cur_pct <= 20.5 else "#F87171",
@@ -532,7 +610,7 @@ cards = [
     },
     {
         "title": "全組合 總曝險與配置",
-        "sub": f"總資產 NT$ {grand_tot:,.0f} · 真實槓桿 {real_lev:.2f}x",
+        "sub": f"總資產 {grand_tot/10000:.1f}萬 · 真實槓桿 {real_lev:.2f}x",
         "cur": min(100.0, (real_lev / 2.5) * 100.0), "sug": 64.0,
         "zw": data["TW"]["z_20w"], "zm": data["US"]["z_20w"],
         "color": "#34D399" if real_lev <= 2.0 else "#F87171",
@@ -668,6 +746,80 @@ with st.expander("📋 查看方案 A 本週精確買賣股數建議", expanded=
     _pool_action("台股核心池 (0050/00685L)", s_0050, tw_p1, tw_v1, s_685l, tw_p2, tw_v2, tw_step_2x, tw_ideal_2x)
     _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670l, us_p2, us_v2, us_step_2x, us_ideal_2x)
 
+# ================= 四張每週資產變化圖（1.總資產 2.台股 3.美股 4.短債） =================
+with st.expander("📊 五年每週資產變化四張圖（台股100萬 / 美股100萬 / 短債50萬起算）", expanded=True):
+    col_in1, col_in2, col_in3 = st.columns(3)
+    sim_tw_wan   = col_in1.number_input("台股初始資金 (萬元)", min_value=0.0, value=100.0, step=10.0)
+    sim_us_wan   = col_in2.number_input("美股初始資金 (萬元)", min_value=0.0, value=100.0, step=10.0)
+    sim_bond_wan = col_in3.number_input("短債初始資金 (萬元)", min_value=0.0, value=50.0, step=10.0)
+
+    sim_tot_init = sim_tw_wan + sim_us_wan + sim_bond_wan
+    df_paths = build_weekly_asset_paths(
+        data["tw_5y"], data["qqq_5y"],
+        init_tw_wan=sim_tw_wan, init_us_wan=sim_us_wan, init_bond_wan=sim_bond_wan
+    )
+
+    if len(df_paths) > 1 and sim_tot_init > 0:
+        end_tot = float(df_paths["total"].iloc[-1])
+        tot_ret_pct = (end_tot / sim_tot_init - 1.0) * 100.0
+        cagr_pct = ((end_tot / sim_tot_init) ** (1.0 / 5.0) - 1.0) * 100.0
+        mdd_pct = ((df_paths["total"] / df_paths["total"].cummax()) - 1.0).min() * 100.0
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("初始總資金", f"{sim_tot_init:.1f} 萬")
+        m2.metric("5 年期末總資產", f"{end_tot:.2f} 萬", f"{tot_ret_pct:+.1f}%")
+        m3.metric("5 年年化報酬 (CAGR)", f"{cagr_pct:+.2f}%")
+        m4.metric("5 年最大回撤 (MDD)", f"{mdd_pct:.2f}%")
+
+    fig4 = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=(
+            "1. 總資產（週別 vs. 總資產）",
+            "2. 台股資產（0050 + 00685L）",
+            "3. 美股資產（00662 + 00670L）",
+            "4. 短債資產（00865B）"
+        ),
+        horizontal_spacing=0.08,
+        vertical_spacing=0.14
+    )
+
+    chart_specs = [
+        ("total", "總資產", "#38BDF8", 1, 1),
+        ("tw",    "台股",   "#4ADE80", 1, 2),
+        ("us",    "美股",   "#F59E0B", 2, 1),
+        ("bond",  "短債",   "#C084FC", 2, 2),
+    ]
+
+    for col_k, s_lbl, line_c, r_idx, c_idx in chart_specs:
+        fig4.add_trace(
+            go.Scatter(
+                x=df_paths["week_label"],
+                y=df_paths[col_k],
+                mode="lines",
+                name=s_lbl,
+                line=dict(color=line_c, width=2.0),
+                hovertemplate="<b>%{x}</b><br>" + s_lbl + ": NT$ %{y:.2f} 萬<extra></extra>"
+            ),
+            row=r_idx, col=c_idx
+        )
+        fig4.update_yaxes(title_text="資產 (萬元)", gridcolor="rgba(51,65,85,0.5)", row=r_idx, col=c_idx)
+        fig4.update_xaxes(title_text="週別", gridcolor="rgba(51,65,85,0.4)", showticklabels=False, row=r_idx, col=c_idx)
+
+    fig4.update_layout(
+        paper_bgcolor="#111827",
+        plot_bgcolor="#0F172A",
+        font=dict(color="#CBD5E1"),
+        height=640,
+        margin=dict(l=50, r=20, t=55, b=35),
+        showlegend=False,
+        hovermode="x unified"
+    )
+
+    st.plotly_chart(fig4, use_container_width=True, config={"scrollZoom": True, "displayModeBar": True})
+    st.caption(
+        f"註：以台股 {sim_tw_wan:.0f} 萬／美股 {sim_us_wan:.0f} 萬／短債 {sim_bond_wan:.0f} 萬（合計 {sim_tot_init:.0f} 萬）為模擬起點，"
+        f"依近五年每週收盤與方案 A（S≥+2.0 收割 5% 入短債上限 20%、S≤-1.0 動用 5% 短債補原型保留 5% 底倉）計算。"
+    )
+
 # ================= 過去五年周線輪轉互動式趨勢圖 =================
 with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬明細（S≥+2.0 收割 00865B）", expanded=True):
     col_sel1, col_sel2 = st.columns([3, 2])
@@ -764,12 +916,11 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬�
                     "<b>【正二轉折】%{x|%Y-%m-%d}</b><br>"
                     "轉折價: " + px_prefix + "%{y:.2f} ｜ 積分 S: %{customdata[0]}<br>"
                     "目標變化: <b>%{customdata[1]} → %{customdata[2]}</b><br>"
-                    "五年累積(100萬起): %{customdata[3]} ｜ 年化: %{customdata[4]}"
+                    "五年累積(250萬起): %{customdata[3]} ｜ 年化: %{customdata[4]}"
                     "<extra></extra>"
                 )
             ))
 
-    # 00865B 收割（S >= +2.0）：藍色（#3B82F6）；00865B 補原型（S <= -1.0）：亮黃色（#FACC15）
     b_harvest = q5y[q5y["bond_act"] == "HARVEST_5"]
     b_dip = q5y[q5y["bond_act"] == "DIP_5"]
 
@@ -862,7 +1013,7 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬�
                 "對應操作方向": action_hint,
             })
         st.dataframe(pd.DataFrame(rows_disp), use_container_width=True, hide_index=True)
-        st.caption(f"註：以五年圖第一天（{q5y.index[0].strftime('%Y-%m-%d')}，收盤價 {px_prefix}{q5y['px'].iloc[0]:.2f}）投入 100 萬為起點計算至各轉折點；藍色菱形為 S≥+2.0 時 00865B 收割 +5%（上限 20%），亮黃色菱形為 S≤-1.0 時 00865B 補原型 -5%（保留 5% 底倉）。")
+        st.caption(f"註：以五年圖第一天（{q5y.index[0].strftime('%Y-%m-%d')}，收盤價 {px_prefix}{q5y['px'].iloc[0]:.2f}）投入 250 萬為起點計算至各轉折點；藍色菱形為 S≥+2.0 時 00865B 收割 +5%（上限 20%），亮黃色菱形為 S≤-1.0 時 00865B 補原型 -5%（保留 5% 底倉）。")
     else:
         st.info("近五年內未發生目標切換。")
 
