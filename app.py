@@ -125,12 +125,11 @@ render_html("""
 </style>
 """)
 
-# 方案 A 目標配置：台股核心池 40% (0050+00685L) / 美股核心池 40% (00662+00670L) / 短債緩衝池 20% 上限 (00865B)
 POOL_TARGET = {"TW": 0.40, "US": 0.40, "BOND": 0.20}
-MAX_STEP_2X = 0.10     # 池內正二單次調整上限 ±10%
-BOND_STEP = 0.05       # 方案 A：多頭收割／低檔補原型單次步進 5%
-BOND_CAP = 0.20        # 00865B 佔總資產上限 20%
-BOND_FLOOR = 0.05      # 低檔補原型時保留至少 5% 最低短債底倉
+MAX_STEP_2X = 0.10
+BOND_STEP = 0.05
+BOND_CAP = 0.20
+BOND_FLOOR = 0.05
 
 def calc_z_and_score(close_series, w_week, w_month):
     close = close_series.dropna().copy()
@@ -202,20 +201,34 @@ def build_5y_weekly_turns(ticker, w_week, w_month):
 
     latest_dt = w_5y.index[-1]
     latest_px = float(w_5y["px"].iloc[-1])
-    cum_rets, ann_rets = [], []
-    for dt, r in turns.iterrows():
-        days = max(1, (latest_dt - dt).days)
-        p0 = float(r["px"])
-        cum_r = (latest_px / p0 - 1.0) * 100.0
-        cum_rets.append(f"{cum_r:+.1f}%")
-        if days >= 21 and p0 > 0 and latest_px > 0:
-            cagr = ((latest_px / p0) ** (365.25 / days) - 1.0) * 100.0
-            ann_rets.append(f"{cagr:+.1f}% (年化)")
-        else:
-            ann_rets.append("未滿3週（看累積）")
 
-    turns["cum_ret"] = cum_rets
-    turns["ann_ret"] = ann_rets
+    w_5y["year"] = w_5y.index.year
+    yr_last_map = w_5y.groupby("year")["px"].last().to_dict()
+
+    five_yr_rets, curr_yr_ann_rets = [], []
+    for dt, r in turns.iterrows():
+        p0 = float(r["px"])
+        yr = int(dt.year)
+
+        # 五年累積報酬：自轉折點起算至「5 年後」或「最新週收盤」
+        target_5y_dt = min(dt + pd.Timedelta(days=365 * 5), latest_dt)
+        idx_5y = w_5y.index.get_indexer([target_5y_dt], method="pad")[0]
+        p_5y = float(w_5y["px"].iloc[max(0, idx_5y)])
+        cum_5y = (p_5y / p0 - 1.0) * 100.0 if p0 > 0 else 0.0
+        five_yr_rets.append(f"{cum_5y:+.1f}%")
+
+        # 當年年化報酬：自轉折點起算至該年年底（若為當年度則至最新週收盤）
+        yr_end_dt = w_5y[w_5y["year"] == yr].index[-1]
+        p_yr_end = float(yr_last_map.get(yr, latest_px))
+        days_in_yr = max(1, (yr_end_dt - dt).days)
+        if p0 > 0 and p_yr_end > 0:
+            yr_ann = ((p_yr_end / p0) ** (365.25 / days_in_yr) - 1.0) * 100.0
+            curr_yr_ann_rets.append(f"{yr_ann:+.1f}% ({yr}年化)")
+        else:
+            curr_yr_ann_rets.append(f"0.0% ({yr}年化)")
+
+    turns["five_yr_ret"] = five_yr_rets
+    turns["curr_yr_ann"] = curr_yr_ann_rets
     return w_5y, turns
 
 @st.cache_data(ttl=600)
@@ -412,7 +425,6 @@ tw_sug_pct   = POOL_TARGET["TW"] * 100.0
 us_sug_pct   = POOL_TARGET["US"] * 100.0
 bond_sug_pct = POOL_TARGET["BOND"] * 100.0
 
-# 雙週期共振理想比例 vs. 本週單次 ±10% 步進目標
 tw_ideal_2x, tw_status = get_raw_target_2x(data["TW"]["score"], data["TW"]["z_20w"])
 us_ideal_2x, us_status = get_raw_target_2x(data["US"]["score"], data["US"]["z_20w"])
 
@@ -434,10 +446,8 @@ us_c1_in = 100.0 - us_c2_in
 us_t2_in = us_step_2x * 100.0
 us_t1_in = 100.0 - us_t2_in
 
-# 方案 A：00865B 每次 5% 收割 / 低檔補原型（上限 20%）目標計算
 tw_score = data["TW"]["score"]
 us_score = data["US"]["score"]
-avg_score = 0.5 * tw_score + 0.5 * us_score
 cur_bond_ratio = (bond_v / grand_tot) if grand_tot > 0 else 0.0
 
 plan_a_mode = "HOLD"
@@ -606,7 +616,6 @@ render_html(f"""
 """)
 
 with st.expander("📋 查看方案 A 本週精確買賣股數建議", expanded=True):
-    # 1. 00865B 收割／補原型動作
     if plan_a_mode == "HARVEST_TO_865B" and grand_tot > 0 and bond_p > 0:
         move_amt = plan_a_step_ratio * grand_tot
         buy_865b_sh = int(move_amt // bond_p)
@@ -626,7 +635,6 @@ with st.expander("📋 查看方案 A 本週精確買賣股數建議", expanded=
     else:
         st.success(f"✅ **【00865B 短債緩衝池】**：目前占總資產 **{bond_cur_pct:.1f}%**（上限 20%），本週無需執行收割或動用短債。")
 
-    # 2. 池內原型 vs 正二步進（單次上限 ±10%）
     def _pool_action(name, s1, p1, v1, s2, p2, v2, step_2x, ideal_2x):
         ptot = v1 + v2
         cur2 = (v2 / ptot) if ptot > 0 else 0.0
@@ -647,7 +655,7 @@ with st.expander("📋 查看方案 A 本週精確買賣股數建議", expanded=
     _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670l, us_p2, us_v2, us_step_2x, us_ideal_2x)
 
 # ================= 過去五年周線輪轉互動式趨勢圖 =================
-with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點年化報酬明細（單次上限 ±10%）", expanded=True):
+with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬明細（單次上限 ±10%）", expanded=True):
     col_sel1, col_sel2 = st.columns([3, 2])
     with col_sel1:
         selected_target = st.radio(
@@ -730,8 +738,8 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點年化�
                 sub_t["score"].map(lambda v: f"{v:+.2f}"),
                 sub_t["prev_t2x"].map(lambda v: f"{v*100:.0f}%"),
                 sub_t["t2x"].map(lambda v: f"{v*100:.0f}%"),
-                sub_t["cum_ret"],
-                sub_t["ann_ret"],
+                sub_t["five_yr_ret"],
+                sub_t["curr_yr_ann"],
             ], axis=-1)
             fig.add_trace(go.Scatter(
                 x=sub_t.index, y=sub_t["px"],
@@ -742,7 +750,7 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點年化�
                     "<b>【轉折點】%{x|%Y-%m-%d}</b><br>"
                     "轉折價: " + px_prefix + "%{y:.2f} ｜ 積分 S: %{customdata[0]}<br>"
                     "目標變化: <b>%{customdata[1]} → %{customdata[2]}</b><br>"
-                    "至今累積: %{customdata[3]} ｜ 年化: %{customdata[4]}"
+                    "五年累積: %{customdata[3]} ｜ 當年年化: %{customdata[4]}"
                     "<extra></extra>"
                 )
             ))
@@ -805,11 +813,12 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點年化�
                 "週收盤價": f"{px_prefix}{r['px']:.2f}",
                 "綜合積分 S": f"{r['score']:+.2f}",
                 "單次目標變化 (±10%)": f"{prev_lbl} → {curr_lbl}",
-                "至今累積報酬": r["cum_ret"],
-                "折合年化報酬": r["ann_ret"],
+                "五年累積報酬": r["five_yr_ret"],
+                "當年年化報酬": r["curr_yr_ann"],
                 "對應操作方向": action_hint,
             })
         st.dataframe(pd.DataFrame(rows_disp), use_container_width=True, hide_index=True)
+        st.caption("註：五年累積報酬以轉折日起算至 5 年後或最新週收盤；當年年化報酬以轉折日起算至該年年底依實際天數折算。")
     else:
         st.info("近五年內未發生目標切換。")
 
