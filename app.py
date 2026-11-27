@@ -194,7 +194,6 @@ def build_5y_weekly_turns(ticker, w_week, w_month):
     w_df["raw_t2x"] = raw_list
     w_df["t2x"] = apply_step_cap(raw_list, MAX_STEP_2X)
 
-    # 計算 00865B 每次 5% 收割（S >= 1.5，上限 20%）與 5% 補原型（S <= -1.0，保留 5% 底倉）歷史事件
     cur_bw = 0.20
     bw_list = []
     act_list = []
@@ -216,7 +215,6 @@ def build_5y_weekly_turns(ticker, w_week, w_month):
     w_5y["prev_t2x"] = w_5y["t2x"].shift(1)
     turns = w_5y[(w_5y["prev_t2x"].notna()) & ((w_5y["t2x"] - w_5y["prev_t2x"]).abs() > 1e-6)].copy()
 
-    # 以「五年圖第一天」投入 100 萬為基準，計算到每一個轉折點的累積報酬率與年化報酬率
     start_dt = w_5y.index[0]
     start_px = float(w_5y["px"].iloc[0])
 
@@ -667,7 +665,7 @@ with st.expander("📋 查看方案 A 本週精確買賣股數建議", expanded=
     _pool_action("台股核心池 (0050/00685L)", s_0050, tw_p1, tw_v1, s_685l, tw_p2, tw_v2, tw_step_2x, tw_ideal_2x)
     _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670l, us_p2, us_v2, us_step_2x, us_ideal_2x)
 
-# ================= 過去五年周線輪轉互動式趨勢圖（含 00865B 5% 收割/補原型點位） =================
+# ================= 過去五年周線輪轉互動式趨勢圖 =================
 with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬明細（含 00865B 5% 策略點位）", expanded=True):
     col_sel1, col_sel2 = st.columns([3, 2])
     with col_sel1:
@@ -768,7 +766,7 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬�
                 )
             ))
 
-    # 疊加 00865B 每次 5% 收割（轉短債）與 5% 補原型（動用短債）點位
+    # 00865B 收割：藍色（#3B82F6）；00865B 補原型：橘色（#F97316）
     b_harvest = q5y[q5y["bond_act"] == "HARVEST_5"]
     b_dip = q5y[q5y["bond_act"] == "DIP_5"]
 
@@ -776,7 +774,7 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬�
         fig.add_trace(go.Scatter(
             x=b_harvest.index, y=b_harvest["px"],
             mode="markers", name="00865B 收割 (+5% 轉短債)",
-            marker=dict(color="#34D399", symbol="diamond", size=9, line=dict(color="#FFFFFF", width=1.0)),
+            marker=dict(color="#3B82F6", symbol="diamond", size=9, line=dict(color="#FFFFFF", width=1.0)),
             customdata=b_harvest["bond_w"].map(lambda v: f"{v*100:.0f}%"),
             hovertemplate=(
                 "<b>【00865B 收割 +5%】%{x|%Y-%m-%d}</b><br>"
@@ -789,7 +787,7 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬�
         fig.add_trace(go.Scatter(
             x=b_dip.index, y=b_dip["px"],
             mode="markers", name="00865B 補原型 (-5% 動用短債)",
-            marker=dict(color="#60A5FA", symbol="diamond", size=9, line=dict(color="#FFFFFF", width=1.0)),
+            marker=dict(color="#F97316", symbol="diamond", size=9, line=dict(color="#FFFFFF", width=1.0)),
             customdata=b_dip["bond_w"].map(lambda v: f"{v*100:.0f}%"),
             hovertemplate=(
                 "<b>【00865B 補原型 -5%】%{x|%Y-%m-%d}</b><br>"
@@ -861,7 +859,7 @@ with st.expander("📈 過去五年周線輪轉 Trend Chart 與轉折點報酬�
                 "對應操作方向": action_hint,
             })
         st.dataframe(pd.DataFrame(rows_disp), use_container_width=True, hide_index=True)
-        st.caption(f"註：以五年圖第一天（{q5y.index[0].strftime('%Y-%m-%d')}，收盤價 {px_prefix}{q5y['px'].iloc[0]:.2f}）投入 100 萬為起點計算至各轉折點；菱形點位代表 00865B 每次 5% 收割（上限 20%）或 5% 補原型（保留 5% 底倉）。")
+        st.caption(f"註：以五年圖第一天（{q5y.index[0].strftime('%Y-%m-%d')}，收盤價 {px_prefix}{q5y['px'].iloc[0]:.2f}）投入 100 萬為起點計算至各轉折點；藍色菱形為 00865B 收割 +5%（上限 20%），橘色菱形為 00865B 補原型 -5%（保留 5% 底倉）。")
     else:
         st.info("近五年內未發生目標切換。")
 
