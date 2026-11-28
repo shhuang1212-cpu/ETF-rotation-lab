@@ -138,6 +138,7 @@ BOND_CAP = 0.20
 BOND_FLOOR = 0.05
 HARVEST_S_TH = 2.0
 DIP_S_TH = -1.0
+VOL_WIN_DAYS = 200
 
 INIT_TW_TWD   = 1_000_000.0
 INIT_US_TWD   = 1_000_000.0
@@ -255,20 +256,22 @@ def build_10y_weekly_turns(ticker, w_week, w_month):
     return w_10y, turns
 
 def build_weekly_asset_paths(tw_w10y, us_w10y, init_tw_wan=100.0, init_us_wan=100.0, init_bond_wan=50.0):
+    """以日序列計算 200 日日變化標準差，標記每週總資產的 5σ 質押提醒點位與 3σ 警戒點位"""
     common_idx = tw_w10y.index.intersection(us_w10y.index)
     if len(common_idx) < 5:
         common_idx = tw_w10y.index
 
-    tw_px = tw_w10y["px"].reindex(common_idx).ffill()
-    us_px = us_w10y["px"].reindex(common_idx).ffill()
-    tw_sc = tw_w10y["score"].reindex(common_idx).ffill().fillna(0.0)
-    us_sc = us_w10y["score"].reindex(common_idx).ffill().fillna(0.0)
+    d_idx = pd.date_range(common_idx[0], common_idx[-1], freq="B")
+    tw_px_d = tw_w10y["px"].reindex(d_idx).ffill().bfill()
+    us_px_d = us_w10y["px"].reindex(d_idx).ffill().bfill()
+    tw_sc_d = tw_w10y["score"].reindex(d_idx).ffill().fillna(0.0)
+    us_sc_d = us_w10y["score"].reindex(d_idx).ffill().fillna(0.0)
 
-    r_tw_1x = tw_px.pct_change().fillna(0.0)
-    r_us_1x = us_px.pct_change().fillna(0.0)
-    r_tw_2x = (2.0 * r_tw_1x - (0.024 / 52.0) - (r_tw_1x ** 2)).clip(-0.45, 0.45)
-    r_us_2x = (2.0 * r_us_1x - (0.024 / 52.0) - (r_us_1x ** 2)).clip(-0.45, 0.45)
-    r_bond  = (0.036 / 52.0)
+    r_tw_1x = tw_px_d.pct_change().fillna(0.0)
+    r_us_1x = us_px_d.pct_change().fillna(0.0)
+    r_tw_2x = (2.0 * r_tw_1x - (0.024 / 252.0) - (r_tw_1x ** 2)).clip(-0.35, 0.35)
+    r_us_2x = (2.0 * r_us_1x - (0.024 / 252.0) - (r_us_1x ** 2)).clip(-0.35, 0.35)
+    r_bond  = (0.036 / 252.0)
 
     tw_1 = init_tw_wan * 0.50
     tw_2 = init_tw_wan * 0.50
@@ -276,8 +279,8 @@ def build_weekly_asset_paths(tw_w10y, us_w10y, init_tw_wan=100.0, init_us_wan=10
     us_2 = init_us_wan * 0.50
     bond_v = init_bond_wan
 
-    recs = []
-    for idx_i, dt in enumerate(common_idx):
+    d_recs = []
+    for idx_i, dt in enumerate(d_idx):
         if idx_i > 0:
             tw_1 *= (1.0 + float(r_tw_1x.iloc[idx_i]))
             tw_2 *= (1.0 + float(r_tw_2x.iloc[idx_i]))
@@ -285,7 +288,7 @@ def build_weekly_asset_paths(tw_w10y, us_w10y, init_tw_wan=100.0, init_us_wan=10
             us_2 *= (1.0 + float(r_us_2x.iloc[idx_i]))
             bond_v *= (1.0 + float(r_bond))
 
-        sc = 0.5 * float(tw_sc.iloc[idx_i]) + 0.5 * float(us_sc.iloc[idx_i])
+        sc = 0.5 * float(tw_sc_d.iloc[idx_i]) + 0.5 * float(us_sc_d.iloc[idx_i])
         tot = tw_1 + tw_2 + us_1 + us_2 + bond_v
         cur_b = (bond_v / tot) if tot > 0 else 0.0
 
@@ -305,17 +308,42 @@ def build_weekly_asset_paths(tw_w10y, us_w10y, init_tw_wan=100.0, init_us_wan=10
                 tw_1 += amt * 0.5
                 us_1 += amt * 0.5
 
-        tot_now = tw_1 + tw_2 + us_1 + us_2 + bond_v
-        recs.append({
+        d_recs.append({
             "date": dt,
-            "week_label": f"第{idx_i + 1}週 ({dt.strftime('%Y-%m-%d')})",
-            "total": round(tot_now, 2),
-            "tw": round(tw_1 + tw_2, 2),
-            "us": round(us_1 + us_2, 2),
-            "bond": round(bond_v, 2),
+            "total": tw_1 + tw_2 + us_1 + us_2 + bond_v,
+            "tw": tw_1 + tw_2,
+            "us": us_1 + us_2,
+            "bond": bond_v,
         })
 
-    return pd.DataFrame(recs)
+    df_d = pd.DataFrame(d_recs).set_index("date")
+    df_d["d_ret"] = df_d["total"].pct_change().fillna(0.0)
+    df_d["sigma_200d"] = df_d["d_ret"].rolling(VOL_WIN_DAYS, min_periods=30).std(ddof=1)
+    fallback_sig = float(df_d["d_ret"].std(ddof=1)) if float(df_d["d_ret"].std(ddof=1)) > 0 else 0.015
+    df_d["sigma_200d"] = df_d["sigma_200d"].fillna(fallback_sig)
+
+    df_d["th_3sig"] = -3.0 * df_d["sigma_200d"]
+    df_d["th_5sig"] = -5.0 * df_d["sigma_200d"]
+    df_d["hit_3sig"] = df_d["d_ret"] <= df_d["th_3sig"]
+    df_d["hit_5sig"] = df_d["d_ret"] <= df_d["th_5sig"]
+
+    df_w = pd.DataFrame({
+        "total": df_d["total"].resample("W-FRI").last(),
+        "tw": df_d["tw"].resample("W-FRI").last(),
+        "us": df_d["us"].resample("W-FRI").last(),
+        "bond": df_d["bond"].resample("W-FRI").last(),
+        "min_d_ret": df_d["d_ret"].resample("W-FRI").min(),
+        "sig5_pct": (df_d["th_5sig"] * 100.0).resample("W-FRI").last(),
+        "pledge_5sig": df_d["hit_5sig"].resample("W-FRI").max().fillna(False),
+        "warn_3sig": df_d["hit_3sig"].resample("W-FRI").max().fillna(False),
+    }).dropna().reset_index()
+
+    df_w["week_label"] = [f"第{i + 1}週 ({dt.strftime('%Y-%m-%d')})" for i, dt in enumerate(df_w["date"])]
+    for c_name in ["total", "tw", "us", "bond"]:
+        df_w[c_name] = df_w[c_name].round(2)
+
+    latest_sig5_pct = float(df_w["sig5_pct"].iloc[-1]) if len(df_w) > 0 else -7.5
+    return df_w, latest_sig5_pct
 
 @st.cache_data(ttl=600)
 def fetch_market_data():
@@ -481,7 +509,6 @@ with col_b:
 with st.spinner("正在抓取五檔最新還原權息報價與近十年周線轉折..."):
     data = fetch_market_data()
 
-# 股票分割／單日異常跳空防呆警示橫幅
 split_warnings = []
 if data["TW"].get("is_locked"):
     split_warnings.append(
@@ -767,15 +794,15 @@ with st.expander("📋 查看方案 A 本週精確買賣股數建議", expanded=
     _pool_action("台股核心池 (0050/00685L)", s_0050, tw_p1, tw_v1, s_685l, tw_p2, tw_v2, tw_step_2x, tw_ideal_2x, locked=data["TW"].get("is_locked", False))
     _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670l, us_p2, us_v2, us_step_2x, us_ideal_2x, locked=False)
 
-# ================= 四張每週資產變化圖（過去十年 · 1.總資產 2.台股 3.美股 4.短債） =================
-with st.expander("📊 過去十年每週資產變化四張圖（台股100萬 / 美股100萬 / 短債50萬起算）", expanded=True):
+# ================= 四張每週資產變化圖（含 1.總資產 200日 5σ 質押提醒點位） =================
+with st.expander("📊 過去十年每週資產變化四張圖（含 200日 5σ 可質押提醒點位）", expanded=True):
     col_in1, col_in2, col_in3 = st.columns(3)
     sim_tw_wan   = col_in1.number_input("台股初始資金 (萬元)", min_value=0.0, value=100.0, step=10.0, key="sim_tw_10y")
     sim_us_wan   = col_in2.number_input("美股初始資金 (萬元)", min_value=0.0, value=100.0, step=10.0, key="sim_us_10y")
     sim_bond_wan = col_in3.number_input("短債初始資金 (萬元)", min_value=0.0, value=50.0, step=10.0, key="sim_bond_10y")
 
     sim_tot_init = sim_tw_wan + sim_us_wan + sim_bond_wan
-    df_paths = build_weekly_asset_paths(
+    df_paths, latest_sig5_pct = build_weekly_asset_paths(
         data["tw_10y"], data["qqq_10y"],
         init_tw_wan=sim_tw_wan, init_us_wan=sim_us_wan, init_bond_wan=sim_bond_wan
     )
@@ -785,16 +812,17 @@ with st.expander("📊 過去十年每週資產變化四張圖（台股100萬 / 
         tot_ret_pct = (end_tot / sim_tot_init - 1.0) * 100.0
         cagr_pct = ((end_tot / sim_tot_init) ** (1.0 / 10.0) - 1.0) * 100.0
         mdd_pct = ((df_paths["total"] / df_paths["total"].cummax()) - 1.0).min() * 100.0
+        p5_cnt = int(df_paths["pledge_5sig"].sum())
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("初始總資金", f"{sim_tot_init:.1f} 萬")
         m2.metric("10 年期末總資產", f"{end_tot:.2f} 萬", f"{tot_ret_pct:+.1f}%")
-        m3.metric("10 年年化報酬 (CAGR)", f"{cagr_pct:+.2f}%")
+        m3.metric("最新 5σ 質押門檻", f"{latest_sig5_pct:.2f}%", f"10年共 {p5_cnt} 週觸發")
         m4.metric("10 年最大回撤 (MDD)", f"{mdd_pct:.2f}%")
 
     fig4 = make_subplots(
         rows=2, cols=2,
         subplot_titles=(
-            "1. 總資產（過去十年每週）",
+            "1. 總資產（★紅星=200日 5σ 可質押提醒）",
             "2. 台股資產（0050 + 00685L）",
             "3. 美股資產（00662 + 00670L）",
             "4. 短債資產（00865B）"
@@ -825,19 +853,62 @@ with st.expander("📊 過去十年每週資產變化四張圖（台股100萬 / 
         fig4.update_yaxes(title_text="資產 (萬元)", gridcolor="rgba(51,65,85,0.5)", row=r_idx, col=c_idx)
         fig4.update_xaxes(title_text="週別", gridcolor="rgba(51,65,85,0.4)", showticklabels=False, row=r_idx, col=c_idx)
 
+    # 在第 1 張子圖（1. 總資產）疊加 3σ 警戒點與 5σ 股票質押提醒點位
+    w_3sig = df_paths[df_paths["warn_3sig"] & (~df_paths["pledge_5sig"])]
+    if len(w_3sig) > 0:
+        fig4.add_trace(
+            go.Scatter(
+                x=w_3sig["week_label"],
+                y=w_3sig["total"],
+                mode="markers",
+                name="3σ 日跌幅警戒",
+                marker=dict(color="#FACC15", symbol="triangle-down", size=8, line=dict(color="#0F172A", width=0.8)),
+                customdata=w_3sig["min_d_ret"].map(lambda v: f"{v*100:.2f}%"),
+                hovertemplate="<b>【3σ 警戒】%{x}</b><br>當週最深日跌幅: <b>%{customdata}</b><extra></extra>"
+            ),
+            row=1, col=1
+        )
+
+    w_5sig = df_paths[df_paths["pledge_5sig"]]
+    if len(w_5sig) > 0:
+        fig4.add_trace(
+            go.Scatter(
+                x=w_5sig["week_label"],
+                y=w_5sig["total"],
+                mode="markers",
+                name="5σ 可質押提醒",
+                marker=dict(color="#EF4444", symbol="star", size=12, line=dict(color="#FFFFFF", width=1.0)),
+                customdata=np.stack([
+                    w_5sig["min_d_ret"].map(lambda v: f"{v*100:.2f}%"),
+                    w_5sig["sig5_pct"].map(lambda v: f"{v:.2f}%")
+                ], axis=-1),
+                hovertemplate=(
+                    "<b>★【5σ 可質押提醒】%{x}</b><br>"
+                    "當週最深日跌幅: <b>%{customdata[0]}</b>（門檻 %{customdata[1]}）<br>"
+                    "提醒：可評估動用原型 ETF 質押低檔子彈"
+                    "<extra></extra>"
+                )
+            ),
+            row=1, col=1
+        )
+
     fig4.update_layout(
         paper_bgcolor="#111827",
         plot_bgcolor="#0F172A",
         font=dict(color="#CBD5E1"),
-        height=640,
-        margin=dict(l=50, r=20, t=55, b=35),
-        showlegend=False,
+        height=660,
+        margin=dict(l=50, r=20, t=72, b=35),
+        showlegend=True,
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.04, xanchor="center", x=0.5,
+            bgcolor="rgba(30,41,59,0.85)", font=dict(size=11)
+        ),
         hovermode="x unified"
     )
 
     st.plotly_chart(fig4, use_container_width=True, config={"scrollZoom": True, "displayModeBar": True})
     st.caption(
-        f"註：已使用還原權息歷史價格（auto_adjust=True）消除股票分割與除權息斷層，以台股 {sim_tw_wan:.0f} 萬／美股 {sim_us_wan:.0f} 萬／短債 {sim_bond_wan:.0f} 萬（合計 {sim_tot_init:.0f} 萬）為模擬起點計算。"
+        f"註：以總資產日變化率近 {VOL_WIN_DAYS} 個交易日標準差為基準；黃色倒三角為單日跌幅觸及 -3σ 警戒，紅色星星（★）為單日跌幅跌破 -5σ 的「可質押提醒」點位。"
     )
 
 # ================= 過去十年周線輪轉互動式趨勢圖 =================
