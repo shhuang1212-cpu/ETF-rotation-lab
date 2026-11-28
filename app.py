@@ -28,8 +28,8 @@ render_html("""
         border-radius: 6px; border: 1px solid #38BDF8; color: #BAE6FD; background: #0C4A6E;
     }
     .split-alert {
-        background: rgba(250, 204, 21, 0.14); border: 1px solid #FACC15;
-        color: #FEF08A; padding: 10px 14px; border-radius: 10px;
+        background: rgba(56, 189, 248, 0.14); border: 1px solid #38BDF8;
+        color: #BAE6FD; padding: 10px 14px; border-radius: 10px;
         font-size: 0.88rem; font-weight: 700; margin-bottom: 12px;
     }
     .pool-card {
@@ -348,32 +348,45 @@ def build_weekly_asset_paths(tw_w10y, us_w10y, init_tw_wan=100.0, init_us_wan=10
 
 @st.cache_data(ttl=600)
 def fetch_market_data():
-    def _fetch_pool(sym_1x, w_week, w_month, fallback_us=None):
+    def _fetch_tw_pool(sym_1x, w_week, w_month):
         df = yf.Ticker(sym_1x).history(period="3y", auto_adjust=True)
         close = df["Close"].dropna()
         real_price = float(close.iloc[-1])
         real_date = close.index[-1].strftime("%Y-%m-%d")
-        max_1d_chg = float(close.pct_change().abs().tail(10).max())
+        # 擴大至近 60 個交易日檢查分割／異常跳空，避免超過 10 日後防呆失效
+        max_1d_chg = float(close.pct_change().abs().tail(60).max())
         is_anomaly = max_1d_chg > 0.15
-
-        if is_anomaly and fallback_us:
-            us_p = yf.Ticker(fallback_us).history(period="3y", auto_adjust=True)["Close"]
-            fx = yf.Ticker("TWD=X").history(period="3y")["Close"]
-            us_p.index = us_p.index.tz_localize(None).normalize()
-            fx.index = fx.index.tz_localize(None).normalize()
-            synth_twd = (us_p * fx.reindex(us_p.index).ffill()).dropna()
-            _, _, z_20w, z_20m, score = calc_z_and_score(synth_twd, w_week, w_month)
-            return {
-                "price": real_price, "date": real_date, "z_20w": z_20w, "z_20m": z_20m,
-                "score": score, "is_locked": False, "used_fallback": True,
-                "max_1d_chg": max_1d_chg, "fallback_name": fallback_us
-            }
-
         _, _, z_20w, z_20m, score = calc_z_and_score(close, w_week, w_month)
         return {
             "price": real_price, "date": real_date, "z_20w": z_20w, "z_20m": z_20m,
             "score": score, "is_locked": is_anomaly, "used_fallback": False,
             "max_1d_chg": max_1d_chg, "fallback_name": None
+        }
+
+    def _fetch_us_pool_immune(sym_local_etf, w_week, w_month, proxy_us="QQQ"):
+        """
+        00662.TW 于 2026/11 執行 1 拆 5 分割，Yahoo Finance 歷史價格可能尚未回溯調整；
+        因此最新報價抓 00662.TW 計算市值與股數，而 Z 值與積分 S 統一使用 QQQ × TWD=X 還原序列，徹底免疫分割斷層。
+        """
+        local_df = yf.Ticker(sym_local_etf).history(period="1y", auto_adjust=True)
+        local_close = local_df["Close"].dropna()
+        real_price = float(local_close.iloc[-1])
+        real_date = local_close.index[-1].strftime("%Y-%m-%d")
+        max_1d_chg = float(local_close.pct_change().abs().tail(60).max())
+        split_detected = max_1d_chg > 0.15
+
+        us_p = yf.Ticker(proxy_us).history(period="3y", auto_adjust=True)["Close"].dropna()
+        fx = yf.Ticker("TWD=X").history(period="3y")["Close"].dropna()
+        us_p.index = us_p.index.tz_localize(None).normalize()
+        fx.index = fx.index.tz_localize(None).normalize()
+        synth_twd = (us_p * fx.reindex(us_p.index).ffill()).dropna()
+
+        _, _, z_20w, z_20m, score = calc_z_and_score(synth_twd, w_week, w_month)
+        return {
+            "price": real_price, "date": real_date, "z_20w": z_20w, "z_20m": z_20m,
+            "score": score, "is_locked": False, "used_fallback": True,
+            "split_detected": split_detected,
+            "max_1d_chg": max_1d_chg, "fallback_name": proxy_us
         }
 
     def _latest(ticker, default_px=0.0):
@@ -389,8 +402,8 @@ def fetch_market_data():
     tw_10y, tw_turns   = build_10y_weekly_turns("0050.TW", 0.65, 0.35)
 
     return {
-        "TW": _fetch_pool("0050.TW", 0.65, 0.35),
-        "US": _fetch_pool("00662.TW", 0.50, 0.50, fallback_us="QQQ"),
+        "TW": _fetch_tw_pool("0050.TW", 0.65, 0.35),
+        "US": _fetch_us_pool_immune("00662.TW", 0.50, 0.50, proxy_us="QQQ"),
         "p_685l": _latest("00685L.TW"),
         "p_670l": _latest("00670L.TW"),
         "p_865b": _latest("00865B.TW"),
@@ -511,18 +524,18 @@ with col_b:
 with st.spinner("正在抓取五檔最新還原權息報價與近十年周線轉折..."):
     data = fetch_market_data()
 
-split_warnings = []
+split_notes = []
 if data["TW"].get("is_locked"):
-    split_warnings.append(
-        f"台股 0050.TW 近10日出現單日 {data['TW']['max_1d_chg']*100:.1f}% 異常跳空（可能為股票分割／除權息還原資料尚未同步），已鎖定防誤判，請核對分割後最新股數。"
+    split_notes.append(
+        f"台股 0050.TW 近60日出現單日 {data['TW']['max_1d_chg']*100:.1f}% 異常跳空，已鎖定防誤判，請核對分割後最新股數。"
     )
-if data["US"].get("used_fallback"):
-    split_warnings.append(
-        f"美股 00662.TW 近10日出現單日 {data['US']['max_1d_chg']*100:.1f}% 異常跳空（可能為股票分割過渡期），已自動改用 QQQ × 匯率合成序列計算 Z 值。"
+if data["US"].get("split_detected"):
+    split_notes.append(
+        f"偵測到 00662.TW 近期 1 拆 5 分割斷層（最新市價 NT${data['US']['price']:.2f}），美股 Z 值與積分已自動鎖定使用「QQQ × 美元匯率」還原序列計算（不受分割失真影響）；若你有手動填寫 00662 股數，請記得更新為分割後 5 倍股數。"
     )
-if split_warnings:
+if split_notes:
     render_html(
-        '<div class="split-alert">⚠️ <b>股票分割／資料異常防呆提醒</b>：' + " ｜ ".join(split_warnings) + "</div>"
+        '<div class="split-alert">🛡️ <b>股票分割防護已啟動</b>：' + " ｜ ".join(split_notes) + "</div>"
     )
 
 tw_p1, tw_p2 = data["TW"]["price"], data["p_685l"]
@@ -531,15 +544,15 @@ bond_p       = data["p_865b"]
 
 def_0050 = int(round((INIT_TW_TWD * 0.50) / tw_p1)) if tw_p1 > 0 else 5000
 def_685l = int(round((INIT_TW_TWD * 0.50) / tw_p2)) if tw_p2 > 0 else 5000
-def_662  = int(round((INIT_US_TWD * 0.50) / us_p1)) if us_p1 > 0 else 5000
+def_662  = int(round((INIT_US_TWD * 0.50) / us_p1)) if us_p1 > 0 else 21000
 def_670l = int(round((INIT_US_TWD * 0.50) / us_p2)) if us_p2 > 0 else 3000
 def_865b = int(round(INIT_BOND_TWD / bond_p)) if bond_p > 0 else 11000
 
-with st.expander("📝 輸入／修改目前五檔持股與資金（股票分割後請更新為分割後股數）", expanded=False):
+with st.expander("📝 輸入／修改目前五檔持股與資金（00662 已 1 拆 5，請填分割後最新股數）", expanded=False):
     c1, c2, c3, c4 = st.columns(4)
     s_0050 = c1.number_input("0050 股數", min_value=0, value=def_0050, step=100)
     s_685l = c2.number_input("00685L 股數 (台股正2)", min_value=0, value=def_685l, step=100)
-    s_662  = c3.number_input("00662 股數", min_value=0, value=def_662, step=100)
+    s_662  = c3.number_input("00662 股數 (1拆5後)", min_value=0, value=def_662, step=500)
     s_670l = c4.number_input("00670L 股數 (美股正2)", min_value=0, value=def_670l, step=100)
     c5, c6, c7, c8 = st.columns(4)
     s_865b   = c5.number_input("00865B 股數 (短債緩衝池)", min_value=0, value=def_865b, step=100)
@@ -633,11 +646,11 @@ cards = [
     },
     {
         "title": "美股核心池 (40%)",
-        "sub": f"市值 {(us_v1+us_v2)/10000:.1f}萬 · 00662/00670L · S={us_score:+.2f}",
+        "sub": f"市值 {(us_v1+us_v2)/10000:.1f}萬 · 00662(拆後)/00670L · S={us_score:+.2f}",
         "cur": us_cur_pct, "sug": us_sug_pct,
         "z1_lbl": "週/美", "z1_val": data["US"]["z_20w"], "z1_unit": "σ",
         "z2_lbl": "月/美", "z2_val": data["US"]["z_20m"], "z2_unit": "σ",
-        "color": "#60A5FA" if data["US"]["used_fallback"] else "#34D399",
+        "color": "#38BDF8" if data["US"].get("split_detected") else "#34D399",
         "mix": mix_visual_html(
             "池內 原型 vs. 正二",
             us_c1_in, us_c2_in, us_t1_in, us_t2_in,
