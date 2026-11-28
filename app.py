@@ -256,7 +256,6 @@ def build_10y_weekly_turns(ticker, w_week, w_month):
     return w_10y, turns
 
 def build_weekly_asset_paths(tw_w10y, us_w10y, init_tw_wan=100.0, init_us_wan=100.0, init_bond_wan=50.0):
-    """S<= -1.0 時動用 5% 00865B 賣短債買正二（保留 5% 底倉）；並算 252 日 -5σ / -6σ 質押點位"""
     common_idx = tw_w10y.index.intersection(us_w10y.index)
     if len(common_idx) < 5:
         common_idx = tw_w10y.index
@@ -468,7 +467,7 @@ def mix_visual_html(header_text, cur_1x_pct, cur_2x_pct, tgt_1x_pct, tgt_2x_pct,
         f'</div>'
     )
 
-def z_slider_html(label, z_val):
+def z_slider_html(label, z_val, unit_suffix="σ"):
     pos = max(0.0, min(100.0, (z_val + 3.0) / 6.0 * 100.0))
     if z_val >= 2.0:
         c, z_cls = "#F87171", "pp-neg"
@@ -478,13 +477,14 @@ def z_slider_html(label, z_val):
         c, z_cls = "#60A5FA", "pp-pos"
     else:
         c, z_cls = "#FBBF24", "pp-zero"
+    val_str = f"{z_val:+.2f}{unit_suffix}" if unit_suffix == "σ" else f"{z_val:+.2f}"
     return (
         f'<div class="z-row">'
-        f'<span style="min-width:38px;">{label}</span>'
+        f'<span style="min-width:42px;">{label}</span>'
         f'<span style="font-size:0.74rem;color:#94A3B8;">-3σ</span>'
         f'<div class="z-track"><div class="z-center"></div><div class="z-dot" style="left:{pos:.1f}%;background:{c};"></div></div>'
         f'<span style="font-size:0.74rem;color:#94A3B8;">+3σ</span>'
-        f'<span class="{z_cls}" style="min-width:52px;text-align:right;">{z_val:+.2f}σ</span>'
+        f'<span class="{z_cls}" style="min-width:56px;text-align:right;">{val_str}</span>'
         f'</div>'
     )
 
@@ -622,7 +622,8 @@ cards = [
         "title": "台股核心池 (40%)",
         "sub": f"市值 {(tw_v1+tw_v2)/10000:.1f}萬 · 0050/00685L · S={tw_score:+.2f}",
         "cur": tw_cur_pct, "sug": tw_sug_pct,
-        "zw": data["TW"]["z_20w"], "zm": data["TW"]["z_20m"],
+        "z1_lbl": "週/台", "z1_val": data["TW"]["z_20w"], "z1_unit": "σ",
+        "z2_lbl": "月/台", "z2_val": data["TW"]["z_20m"], "z2_unit": "σ",
         "color": "#FACC15" if data["TW"].get("is_locked") else ("#34D399" if abs(tw_cur_pct - tw_sug_pct) <= 10 else "#FBBF24"),
         "mix": mix_visual_html(
             "池內 原型 vs. 正二",
@@ -634,7 +635,8 @@ cards = [
         "title": "美股核心池 (40%)",
         "sub": f"市值 {(us_v1+us_v2)/10000:.1f}萬 · 00662/00670L · S={us_score:+.2f}",
         "cur": us_cur_pct, "sug": us_sug_pct,
-        "zw": data["US"]["z_20w"], "zm": data["US"]["z_20m"],
+        "z1_lbl": "週/美", "z1_val": data["US"]["z_20w"], "z1_unit": "σ",
+        "z2_lbl": "月/美", "z2_val": data["US"]["z_20m"], "z2_unit": "σ",
         "color": "#60A5FA" if data["US"]["used_fallback"] else "#34D399",
         "mix": mix_visual_html(
             "池內 原型 vs. 正二",
@@ -646,7 +648,8 @@ cards = [
         "title": "短債緩衝池 (上限20%)",
         "sub": f"市值 {bond_v/10000:.1f}萬 · 已用 {bond_cur_pct:.1f}% / 20%",
         "cur": min(100.0, (bond_cur_pct / 20.0) * 100.0), "sug": bond_sug_pct,
-        "zw": tw_score, "zm": us_score,
+        "z1_lbl": "台/S", "z1_val": tw_score, "z1_unit": "",
+        "z2_lbl": "美/S", "z2_val": us_score, "z2_unit": "",
         "color": "#34D399" if bond_cur_pct <= 20.5 else "#F87171",
         "mix": mix_visual_html(
             "00865B 水位（占總資產）",
@@ -659,7 +662,8 @@ cards = [
         "title": "全組合 總曝險與配置",
         "sub": f"總資產 {grand_tot/10000:.1f}萬 · 真實槓桿 {real_lev:.2f}x",
         "cur": min(100.0, (real_lev / 2.5) * 100.0), "sug": 64.0,
-        "zw": data["TW"]["z_20w"], "zm": data["US"]["z_20w"],
+        "z1_lbl": "週/台", "z1_val": data["TW"]["z_20w"], "z1_unit": "σ",
+        "z2_lbl": "週/美", "z2_val": data["US"]["z_20w"], "z2_unit": "σ",
         "color": "#34D399" if real_lev <= 2.0 else "#F87171",
         "mix": mix_visual_html(
             "全組合 原型 / 正二 / 短債",
@@ -684,8 +688,8 @@ for idx, c in enumerate(cards):
         f'<div class="stat-line"><span>目標上限</span><span><strong class="stat-val">{c["sug"]:.1f}%</strong> &nbsp;{diff_display}</span></div>'
         f'{c["mix"]}'
         f'<div class="z-block">'
-        f'{z_slider_html("週/台", c["zw"])}'
-        f'{z_slider_html("月/美", c["zm"])}'
+        f'{z_slider_html(c["z1_lbl"], c["z1_val"], c["z1_unit"])}'
+        f'{z_slider_html(c["z2_lbl"], c["z2_val"], c["z2_unit"])}'
         f'</div>'
         f'</div>'
     )
