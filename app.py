@@ -138,7 +138,7 @@ BOND_CAP = 0.20
 BOND_FLOOR = 0.05
 HARVEST_S_TH = 2.0
 DIP_S_TH = -1.0
-VOL_WIN_1Y_DAYS = 252  # 過去一年交易日（約 252 日）日價格變化率標準差
+VOL_WIN_1Y_DAYS = 252
 
 INIT_TW_TWD   = 1_000_000.0
 INIT_US_TWD   = 1_000_000.0
@@ -216,7 +216,7 @@ def build_10y_weekly_turns(ticker, w_week, w_month):
             act_list.append("HARVEST_5")
         elif pd.notna(s) and s <= DIP_S_TH and cur_bw > BOND_FLOOR + 1e-6:
             cur_bw = max(BOND_FLOOR, round(cur_bw - BOND_STEP, 4))
-            act_list.append("DIP_5")
+            act_list.append("BUY_2X_5")
         else:
             act_list.append("NONE")
         bw_list.append(cur_bw)
@@ -256,7 +256,7 @@ def build_10y_weekly_turns(ticker, w_week, w_month):
     return w_10y, turns
 
 def build_weekly_asset_paths(tw_w10y, us_w10y, init_tw_wan=100.0, init_us_wan=100.0, init_bond_wan=50.0):
-    """以過去一年（252日）日價格變化率標準差計算 -5σ 與 -6σ 質押提醒點位"""
+    """S<= -1.0 時動用 5% 00865B 賣短債買正二（保留 5% 底倉）；並算 252 日 -5σ / -6σ 質押點位"""
     common_idx = tw_w10y.index.intersection(us_w10y.index)
     if len(common_idx) < 5:
         common_idx = tw_w10y.index
@@ -305,8 +305,8 @@ def build_weekly_asset_paths(tw_w10y, us_w10y, init_tw_wan=100.0, init_us_wan=10
             amt = min(bond_v, step * tot)
             if amt > 0:
                 bond_v -= amt
-                tw_1 += amt * 0.5
-                us_1 += amt * 0.5
+                tw_2 += amt * 0.5
+                us_2 += amt * 0.5
 
         d_recs.append({
             "date": dt,
@@ -501,7 +501,7 @@ with col_t:
     <div class="lab-header">
         <span class="lab-title">ETF 持股輪動 LAB</span>
         <span class="lab-sub">雙週期共振 · 單次上限 ±10%</span>
-        <span class="lab-badge">方案 A：台股100萬 / 美股100萬 / 短債50萬 · 10年回測</span>
+        <span class="lab-badge">方案 A：台股100萬 / 美股100萬 / 短債50萬 · 賣債買正二</span>
     </div>
     """)
 with col_b:
@@ -595,12 +595,12 @@ if not data["TW"].get("is_locked"):
         plan_a_mode = "HARVEST_TO_865B"
         plan_a_step_ratio = min(BOND_STEP, BOND_CAP - cur_bond_ratio)
     elif (tw_score <= DIP_S_TH or us_score <= DIP_S_TH) and cur_bond_ratio > BOND_FLOOR + 1e-4:
-        plan_a_mode = "DIP_BUY_PROTOTYPE"
+        plan_a_mode = "DIP_BUY_2X"
         plan_a_step_ratio = min(BOND_STEP, cur_bond_ratio - BOND_FLOOR)
 
 tgt_bond_ratio = (
     cur_bond_ratio + plan_a_step_ratio if plan_a_mode == "HARVEST_TO_865B"
-    else (cur_bond_ratio - plan_a_step_ratio if plan_a_mode == "DIP_BUY_PROTOTYPE" else cur_bond_ratio)
+    else (cur_bond_ratio - plan_a_step_ratio if plan_a_mode == "DIP_BUY_2X" else cur_bond_ratio)
 )
 
 tot_1x_val = tw_v1 + us_v1
@@ -709,8 +709,8 @@ under_text  = "、".join(under_pools) if under_pools else "目前已達目標水
 triggered_reasons = []
 if plan_a_mode == "HARVEST_TO_865B":
     triggered_reasons.append(f"高檔過熱收割(S≥+2.0)：正二轉 +{plan_a_step_ratio*100:.1f}% 至 00865B（上限 20%）")
-elif plan_a_mode == "DIP_BUY_PROTOTYPE":
-    triggered_reasons.append(f"低檔積分訊號(S≤-1.0)：動用 {plan_a_step_ratio*100:.1f}% 00865B 補買 0050/00662 原型")
+elif plan_a_mode == "DIP_BUY_2X":
+    triggered_reasons.append(f"低檔積分訊號(S≤-1.0)：賣 {plan_a_step_ratio*100:.1f}% 00865B 買 00685L/00670L 正二")
 
 if not data["TW"].get("is_locked") and abs(tw_cur_2x_ratio - tw_ideal_2x) > 0.01 and (tw_v1 + tw_v2) > 0:
     triggered_reasons.append(f"台股池內正二步進調整（單次上限 ±10%）")
@@ -743,9 +743,9 @@ render_html(f"""
     <div class="guide-box">
         <div>📉 <b>高於目標（偏重）</b>：{over_text}</div>
         <div>📈 <b>低於目標（餘裕）</b>：{under_text}</div>
-        <div style="margin-top:6px; color:#E2E8F0;"><b>📌 方案 A 執行規則（雙週期共振 ＋ 00865B 延後收割／低檔補原型、上限 20%）</b></div>
+        <div style="margin-top:6px; color:#E2E8F0;"><b>📌 方案 A 執行規則（雙週期共振 ＋ 00865B 延後收割／賣債買正二、上限 20%）</b></div>
         <div>1️⃣ <b>多頭過熱收割（S ≥ +2.0 才轉 5%、最多 20%）</b>：讓多頭主升段多飛一段，直到台股或美股綜合積分 <b>S ≥ +2.0</b> 且 00865B 未滿 20%，每次從正二獲利轉 <b>5%</b> 進 00865B 鎖利。</div>
-        <div>2️⃣ <b>低檔補原型（S ≤ -1.0 動用 5%、保留 5% 底倉）</b>：當積分 <b>S ≤ -1.0</b> 時，每次動用 <b>5%</b> 的 00865B 買進 <b>0050 / 00662 原型</b>（避免空頭續跌段承受正二耗損；等積分轉強再由雙週期引擎自動轉正二）。</div>
+        <div>2️⃣ <b>低檔賣債買正二（S ≤ -1.0 動用 5%、保留 5% 底倉）</b>：當積分 <b>S ≤ -1.0</b> 時，每次賣出 <b>5%</b> 的 00865B 買進 <b>00685L / 00670L 正二</b>，把握相對低檔與反彈加速動能。</div>
         <div>3️⃣ <b>池內輪動上限 ±10%</b>：台股池 (40%) 與美股池 (40%) 內部原型與正二互換，每週單次調整上限 <b>10%</b>，降低人性壓力並保留試錯餘裕。</div>
         <div style="color:#94A3B8; margin-top:4px;">
             💡 <b>紀律提醒</b>：生活緊急預備金與投資／槓桿資金獨立切分；照條件執行、不猜高低點，調完就安心蓋牌過生活。
@@ -762,17 +762,17 @@ with st.expander("📋 查看方案 A 本週精確買賣股數建議", expanded=
             f"💰 **【多頭過熱收割 5% → 00865B】**（積分 S ≥ +2.0 且 00865B 目前 {bond_cur_pct:.1f}% < 20%）：\n"
             f"- 建議將約 **NT$ {move_amt:,.0f}**（總資產 {plan_a_step_ratio*100:.1f}%）正二獲利轉入短債 → **買進 00865B 約 {buy_865b_sh:,} 股**。"
         )
-    elif plan_a_mode == "DIP_BUY_PROTOTYPE" and grand_tot > 0 and bond_p > 0:
+    elif plan_a_mode == "DIP_BUY_2X" and grand_tot > 0 and bond_p > 0:
         move_amt = plan_a_step_ratio * grand_tot
         sell_865b_sh = int(move_amt // bond_p)
-        buy_50_sh = int((move_amt * 0.5) // tw_p1) if tw_p1 > 0 else 0
-        buy_662_sh = int((move_amt * 0.5) // us_p1) if us_p1 > 0 else 0
+        buy_685l_sh = int((move_amt * 0.5) // tw_p2) if tw_p2 > 0 else 0
+        buy_670l_sh = int((move_amt * 0.5) // us_p2) if us_p2 > 0 else 0
         st.info(
-            f"🛡️ **【低檔補原型 5% ← 00865B】**（積分 S ≤ -1.0，優先買原型、不急著空頭接正二）：\n"
-            f"- **賣出 00865B 約 {sell_865b_sh:,} 股**（約 NT$ {move_amt:,.0f}），平均轉入：**買進 0050 約 {buy_50_sh:,} 股 ＋ 買進 00662 約 {buy_662_sh:,} 股**。"
+            f"⚡ **【賣短債買正二 5% ← 00865B】**（積分 S ≤ -1.0，保留 5% 短債底倉）：\n"
+            f"- **賣出 00865B 約 {sell_865b_sh:,} 股**（約 NT$ {move_amt:,.0f}），平均轉入：**買進 00685L 約 {buy_685l_sh:,} 股 ＋ 買進 00670L 約 {buy_670l_sh:,} 股**。"
         )
     else:
-        st.success(f"✅ **【00865B 短債緩衝池】**：目前占總資產 **{bond_cur_pct:.1f}%**（上限 20%），本週未觸發 S ≥ +2.0 收割或 S ≤ -1.0 補原型。")
+        st.success(f"✅ **【00865B 短債緩衝池】**：目前占總資產 **{bond_cur_pct:.1f}%**（上限 20%），本週未觸發 S ≥ +2.0 收割或 S ≤ -1.0 賣債買正二。")
 
     def _pool_action(name, s1, p1, v1, s2, p2, v2, step_2x, ideal_2x, locked=False):
         if locked:
@@ -855,7 +855,6 @@ with st.expander("📊 過去十年每週資產變化四張圖（含過去一年
         fig4.update_yaxes(title_text="資產 (萬元)", gridcolor="rgba(51,65,85,0.5)", row=r_idx, col=c_idx)
         fig4.update_xaxes(title_text="週別", gridcolor="rgba(51,65,85,0.4)", showticklabels=False, row=r_idx, col=c_idx)
 
-    # 1. 總資產圖上標示「5σ 質押提醒」與「6σ 極端質押」點位
     w_5sig_only = df_paths[df_paths["hit_5sig"] & (~df_paths["hit_6sig"])]
     if len(w_5sig_only) > 0:
         fig4.add_trace(
@@ -922,7 +921,7 @@ with st.expander("📊 過去十年每週資產變化四張圖（含過去一年
     )
 
 # ================= 過去十年周線輪轉互動式趨勢圖 =================
-with st.expander("📈 過去十年周線輪轉 Trend Chart 與轉折點報酬明細（S≥+2.0 收割 00865B）", expanded=True):
+with st.expander("📈 過去十年周線輪轉 Trend Chart 與轉折點報酬明細（S≥+2.0 收割 ／ S≤-1.0 賣債買正二）", expanded=True):
     col_sel1, col_sel2 = st.columns([3, 2])
     with col_sel1:
         selected_target = st.radio(
@@ -1023,7 +1022,7 @@ with st.expander("📈 過去十年周線輪轉 Trend Chart 與轉折點報酬�
             ))
 
     b_harvest = q10y[q10y["bond_act"] == "HARVEST_5"]
-    b_dip = q10y[q10y["bond_act"] == "DIP_5"]
+    b_buy2x = q10y[q10y["bond_act"] == "BUY_2X_5"]
 
     if len(b_harvest) > 0:
         fig.add_trace(go.Scatter(
@@ -1038,14 +1037,14 @@ with st.expander("📈 過去十年周線輪轉 Trend Chart 與轉折點報酬�
             )
         ))
 
-    if len(b_dip) > 0:
+    if len(b_buy2x) > 0:
         fig.add_trace(go.Scatter(
-            x=b_dip.index, y=b_dip["px"],
-            mode="markers", name="00865B 補原型 (S≤-1.0 轉5%)",
+            x=b_buy2x.index, y=b_buy2x["px"],
+            mode="markers", name="00865B 賣債買正二 (S≤-1.0 轉5%)",
             marker=dict(color="#FACC15", symbol="diamond", size=8.5, line=dict(color="#0F172A", width=0.9)),
-            customdata=b_dip["bond_w"].map(lambda v: f"{v*100:.0f}%"),
+            customdata=b_buy2x["bond_w"].map(lambda v: f"{v*100:.0f}%"),
             hovertemplate=(
-                "<b>【00865B 補原型 -5%】%{x|%Y-%m-%d}</b><br>"
+                "<b>【00865B 賣債買正二 -5%】%{x|%Y-%m-%d}</b><br>"
                 "當週股價: " + px_prefix + "%{y:.2f} ｜ 短債水位降至 <b>%{customdata}</b>"
                 "<extra></extra>"
             )
@@ -1063,7 +1062,7 @@ with st.expander("📈 過去十年周線輪轉 Trend Chart 與轉折點報酬�
 
     fig.update_layout(
         title=dict(
-            text=f"{sym_code} — 10-Year Weekly Trend, ±10% Step & 00865B (S≥+2.0)",
+            text=f"{sym_code} — 10-Year Weekly Trend, ±10% Step & 00865B (±5%)",
             font=dict(size=15, color="#F8FAFC"), x=0.5, xanchor="center", y=0.97
         ),
         paper_bgcolor="#111827",
@@ -1114,7 +1113,7 @@ with st.expander("📈 過去十年周線輪轉 Trend Chart 與轉折點報酬�
                 "對應操作方向": action_hint,
             })
         st.dataframe(pd.DataFrame(rows_disp), use_container_width=True, hide_index=True)
-        st.caption(f"註：以十年圖第一天（{q10y.index[0].strftime('%Y-%m-%d')}，收盤價 {px_prefix}{q10y['px'].iloc[0]:.2f}）投入 250 萬為起點計算至各轉折點；藍色菱形為 S≥+2.0 時 00865B 收割 +5%（上限 20%），亮黃色菱形為 S≤-1.0 時 00865B 補原型 -5%（保留 5% 底倉）。")
+        st.caption(f"註：以十年圖第一天（{q10y.index[0].strftime('%Y-%m-%d')}，收盤價 {px_prefix}{q10y['px'].iloc[0]:.2f}）投入 250 萬為起點計算至各轉折點；藍色菱形為 S≥+2.0 時 00865B 收割 +5%（上限 20%），亮黃色菱形為 S≤-1.0 時 00865B 賣債買正二 -5%（保留 5% 底倉）。")
     else:
         st.info("近十年內未發生目標切換。")
 
