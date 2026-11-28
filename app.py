@@ -144,21 +144,6 @@ INIT_TW_TWD   = 1_000_000.0
 INIT_US_TWD   = 1_000_000.0
 INIT_BOND_TWD =   500_000.0
 
-def calc_z_and_score(close_series, w_week, w_month):
-    close = close_series.dropna().copy()
-    close.index = close.index.tz_localize(None)
-    latest_price = float(close.iloc[-1])
-    latest_date = close.index[-1].strftime("%Y-%m-%d")
-
-    weekly = close.resample("W-FRI").last().dropna().tail(20)
-    z_20w = float((latest_price - weekly.mean()) / weekly.std(ddof=1))
-
-    monthly = close.groupby(close.index.to_period("M")).last().dropna().tail(20)
-    z_20m = float((latest_price - monthly.mean()) / monthly.std(ddof=1))
-
-    score = w_week * z_20w + w_month * z_20m
-    return latest_price, latest_date, z_20w, z_20m, score
-
 def get_raw_target_2x(score, z_20w):
     if pd.isna(score) or pd.isna(z_20w):
         return 0.50, "資料暖機區 (理想 1.5x)"
@@ -190,11 +175,11 @@ def apply_step_cap(raw_targets, max_step=0.10):
         stepped.append(cur)
     return stepped
 
-def build_10y_weekly_turns(ticker, w_week, w_month):
-    hist = yf.Ticker(ticker).history(period="12y", auto_adjust=True)["Close"].dropna()
-    hist.index = hist.index.tz_localize(None)
-    w_s = hist.resample("W-FRI").last().dropna()
-    m_s = hist.resample("ME").last().dropna()
+def _compute_weekly_df_from_series(px_series, w_week, w_month):
+    s = px_series.dropna().copy()
+    s.index = s.index.tz_localize(None)
+    w_s = s.resample("W-FRI").last().dropna()
+    m_s = s.resample("ME").last().dropna()
 
     w_df = pd.DataFrame({"px": w_s})
     w_df["ma20w"] = w_df["px"].rolling(20).mean()
@@ -203,18 +188,18 @@ def build_10y_weekly_turns(ticker, w_week, w_month):
     w_df["z20m"] = m_z20.reindex(w_df.index, method="ffill")
     w_df["score"] = w_week * w_df["z20w"] + w_month * w_df["z20m"]
 
-    raw_list = [get_raw_target_2x(s, zw)[0] for s, zw in zip(w_df["score"], w_df["z20w"])]
+    raw_list = [get_raw_target_2x(sc, zw)[0] for sc, zw in zip(w_df["score"], w_df["z20w"])]
     w_df["raw_t2x"] = raw_list
     w_df["t2x"] = apply_step_cap(raw_list, MAX_STEP_2X)
 
     cur_bw = 0.20
     bw_list = []
     act_list = []
-    for s in w_df["score"]:
-        if pd.notna(s) and s >= HARVEST_S_TH and cur_bw < BOND_CAP - 1e-6:
+    for sc in w_df["score"]:
+        if pd.notna(sc) and sc >= HARVEST_S_TH and cur_bw < BOND_CAP - 1e-6:
             cur_bw = min(BOND_CAP, round(cur_bw + BOND_STEP, 4))
             act_list.append("HARVEST_5")
-        elif pd.notna(s) and s <= DIP_S_TH and cur_bw > BOND_FLOOR + 1e-6:
+        elif pd.notna(sc) and sc <= DIP_S_TH and cur_bw > BOND_FLOOR + 1e-6:
             cur_bw = max(BOND_FLOOR, round(cur_bw - BOND_STEP, 4))
             act_list.append("BUY_2X_5")
         else:
@@ -222,7 +207,10 @@ def build_10y_weekly_turns(ticker, w_week, w_month):
         bw_list.append(cur_bw)
     w_df["bond_w"] = bw_list
     w_df["bond_act"] = act_list
+    w_df["prev_t2x"] = w_df["t2x"].shift(1).fillna(w_df["t2x"])
+    return w_df
 
+def build_10y_weekly_turns_from_wdf(w_df):
     cutoff = w_df.index[-1] - pd.Timedelta(days=365 * 10)
     w_10y = w_df[w_df.index >= cutoff].copy()
     w_10y["prev_t2x"] = w_10y["t2x"].shift(1)
@@ -348,47 +336,6 @@ def build_weekly_asset_paths(tw_w10y, us_w10y, init_tw_wan=100.0, init_us_wan=10
 
 @st.cache_data(ttl=600)
 def fetch_market_data():
-    def _fetch_tw_pool(sym_1x, w_week, w_month):
-        df = yf.Ticker(sym_1x).history(period="3y", auto_adjust=True)
-        close = df["Close"].dropna()
-        real_price = float(close.iloc[-1])
-        real_date = close.index[-1].strftime("%Y-%m-%d")
-        # 擴大至近 60 個交易日檢查分割／異常跳空，避免超過 10 日後防呆失效
-        max_1d_chg = float(close.pct_change().abs().tail(60).max())
-        is_anomaly = max_1d_chg > 0.15
-        _, _, z_20w, z_20m, score = calc_z_and_score(close, w_week, w_month)
-        return {
-            "price": real_price, "date": real_date, "z_20w": z_20w, "z_20m": z_20m,
-            "score": score, "is_locked": is_anomaly, "used_fallback": False,
-            "max_1d_chg": max_1d_chg, "fallback_name": None
-        }
-
-    def _fetch_us_pool_immune(sym_local_etf, w_week, w_month, proxy_us="QQQ"):
-        """
-        00662.TW 于 2026/11 執行 1 拆 5 分割，Yahoo Finance 歷史價格可能尚未回溯調整；
-        因此最新報價抓 00662.TW 計算市值與股數，而 Z 值與積分 S 統一使用 QQQ × TWD=X 還原序列，徹底免疫分割斷層。
-        """
-        local_df = yf.Ticker(sym_local_etf).history(period="1y", auto_adjust=True)
-        local_close = local_df["Close"].dropna()
-        real_price = float(local_close.iloc[-1])
-        real_date = local_close.index[-1].strftime("%Y-%m-%d")
-        max_1d_chg = float(local_close.pct_change().abs().tail(60).max())
-        split_detected = max_1d_chg > 0.15
-
-        us_p = yf.Ticker(proxy_us).history(period="3y", auto_adjust=True)["Close"].dropna()
-        fx = yf.Ticker("TWD=X").history(period="3y")["Close"].dropna()
-        us_p.index = us_p.index.tz_localize(None).normalize()
-        fx.index = fx.index.tz_localize(None).normalize()
-        synth_twd = (us_p * fx.reindex(us_p.index).ffill()).dropna()
-
-        _, _, z_20w, z_20m, score = calc_z_and_score(synth_twd, w_week, w_month)
-        return {
-            "price": real_price, "date": real_date, "z_20w": z_20w, "z_20m": z_20m,
-            "score": score, "is_locked": False, "used_fallback": True,
-            "split_detected": split_detected,
-            "max_1d_chg": max_1d_chg, "fallback_name": proxy_us
-        }
-
     def _latest(ticker, default_px=0.0):
         try:
             s = yf.Ticker(ticker).history(period="5d", auto_adjust=True)["Close"].dropna()
@@ -398,12 +345,60 @@ def fetch_market_data():
             pass
         return default_px
 
-    qqq_10y, qqq_turns = build_10y_weekly_turns("QQQ", 0.50, 0.50)
-    tw_10y, tw_turns   = build_10y_weekly_turns("0050.TW", 0.65, 0.35)
+    # 台股 0050：使用與 Trend Chart 完全一致的周線步進引擎
+    tw_full_s = yf.Ticker("0050.TW").history(period="12y", auto_adjust=True)["Close"].dropna()
+    tw_w_full = _compute_weekly_df_from_series(tw_full_s, 0.65, 0.35)
+    tw_10y, tw_turns = build_10y_weekly_turns_from_wdf(tw_w_full)
+
+    tw_last = tw_w_full.iloc[-1]
+    tw_max_chg = float(tw_full_s.pct_change().abs().tail(60).max())
+    tw_info = {
+        "price": float(tw_last["px"]),
+        "date": tw_w_full.index[-1].strftime("%Y-%m-%d"),
+        "z_20w": float(tw_last["z20w"]),
+        "z_20m": float(tw_last["z20m"]),
+        "score": float(tw_last["score"]),
+        "prev_t2x": float(tw_last["prev_t2x"]),
+        "t2x": float(tw_last["t2x"]),
+        "raw_t2x": float(tw_last["raw_t2x"]),
+        "is_locked": tw_max_chg > 0.15,
+        "max_1d_chg": tw_max_chg,
+    }
+
+    # 美股：QQQ 12年周線引擎 + 00662.TW 最新分割後股價
+    qqq_full_s = yf.Ticker("QQQ").history(period="12y", auto_adjust=True)["Close"].dropna()
+    qqq_w_full = _compute_weekly_df_from_series(qqq_full_s, 0.50, 0.50)
+    qqq_10y, qqq_turns = build_10y_weekly_turns_from_wdf(qqq_w_full)
+
+    us_p = qqq_full_s.copy()
+    fx = yf.Ticker("TWD=X").history(period="12y")["Close"].dropna()
+    us_p.index = us_p.index.tz_localize(None).normalize()
+    fx.index = fx.index.tz_localize(None).normalize()
+    synth_twd = (us_p * fx.reindex(us_p.index).ffill()).dropna()
+    us_w_full = _compute_weekly_df_from_series(synth_twd, 0.50, 0.50)
+
+    local_662_s = yf.Ticker("00662.TW").history(period="1y", auto_adjust=True)["Close"].dropna()
+    p_662_cur = float(local_662_s.iloc[-1]) if len(local_662_s) > 0 else float(qqq_full_s.iloc[-1])
+    us_max_chg = float(local_662_s.pct_change().abs().tail(60).max()) if len(local_662_s) > 1 else 0.0
+
+    us_last = us_w_full.iloc[-1]
+    us_info = {
+        "price": p_662_cur,
+        "date": us_w_full.index[-1].strftime("%Y-%m-%d"),
+        "z_20w": float(us_last["z20w"]),
+        "z_20m": float(us_last["z20m"]),
+        "score": float(us_last["score"]),
+        "prev_t2x": float(us_last["prev_t2x"]),
+        "t2x": float(us_last["t2x"]),
+        "raw_t2x": float(us_last["raw_t2x"]),
+        "is_locked": False,
+        "split_detected": us_max_chg > 0.15,
+        "max_1d_chg": us_max_chg,
+    }
 
     return {
-        "TW": _fetch_tw_pool("0050.TW", 0.65, 0.35),
-        "US": _fetch_us_pool_immune("00662.TW", 0.50, 0.50, proxy_us="QQQ"),
+        "TW": tw_info,
+        "US": us_info,
         "p_685l": _latest("00685L.TW"),
         "p_670l": _latest("00670L.TW"),
         "p_865b": _latest("00865B.TW"),
@@ -414,12 +409,6 @@ def fetch_market_data():
             "台股 0050 (對應 0050/00685L)": ("0050.TW", tw_10y, tw_turns, "TWD"),
         }
     }
-
-def step_toward(current_ratio, ideal_ratio, max_step=0.10):
-    diff = ideal_ratio - current_ratio
-    if abs(diff) <= max_step + 1e-9:
-        return round(ideal_ratio, 4)
-    return round(current_ratio + np.sign(diff) * max_step, 4)
 
 def gauge_svg(pct_0_to_100, color="#34D399"):
     pct = max(0.0, min(100.0, pct_0_to_100))
@@ -458,7 +447,7 @@ def mix_visual_html(header_text, cur_1x_pct, cur_2x_pct, tgt_1x_pct, tgt_2x_pct,
     return (
         f'<div class="mix-box">'
         f'<div class="mix-title"><span>{header_text}</span></div>'
-        f'<div class="mix-row-label"><span>現況</span><span>{cur_lbl}</span></div>'
+        f'<div class="mix-row-label"><span>前週基準</span><span>{cur_lbl}</span></div>'
         f'<div class="mix-bar">'
         f'<div class="bar-1x" style="width:{c1:.1f}%;"></div>'
         f'<div class="bar-2x" style="width:{c2:.1f}%;"></div>'
@@ -514,7 +503,7 @@ with col_t:
     <div class="lab-header">
         <span class="lab-title">ETF 持股輪動 LAB</span>
         <span class="lab-sub">雙週期共振 · 單次上限 ±10%</span>
-        <span class="lab-badge">方案 A：台股100萬 / 美股100萬 / 短債50萬 · 賣債買正二</span>
+        <span class="lab-badge">方案 A：台股100萬 / 美股100萬 / 短債50萬 · 卡片與 Trend Chart 同步</span>
     </div>
     """)
 with col_b:
@@ -531,11 +520,11 @@ if data["TW"].get("is_locked"):
     )
 if data["US"].get("split_detected"):
     split_notes.append(
-        f"偵測到 00662.TW 近期 1 拆 5 分割斷層（最新市價 NT${data['US']['price']:.2f}），美股 Z 值與積分已自動鎖定使用「QQQ × 美元匯率」還原序列計算（不受分割失真影響）；若你有手動填寫 00662 股數，請記得更新為分割後 5 倍股數。"
+        f"00662.TW 近期 1 拆 5 分割（最新市價 NT${data['US']['price']:.2f}），美股池 Z 值、積分與正二步進已統一改由 QQQ 還原周線序列計算並與 Trend Chart 連動。"
     )
 if split_notes:
     render_html(
-        '<div class="split-alert">🛡️ <b>股票分割防護已啟動</b>：' + " ｜ ".join(split_notes) + "</div>"
+        '<div class="split-alert">🛡️ <b>股票分割防護與資料連動已啟用</b>：' + " ｜ ".join(split_notes) + "</div>"
     )
 
 tw_p1, tw_p2 = data["TW"]["price"], data["p_685l"]
@@ -576,23 +565,21 @@ tw_sug_pct   = POOL_TARGET["TW"] * 100.0
 us_sug_pct   = POOL_TARGET["US"] * 100.0
 bond_sug_pct = POOL_TARGET["BOND"] * 100.0
 
-tw_ideal_2x, tw_status = get_raw_target_2x(data["TW"]["score"], data["TW"]["z_20w"])
-us_ideal_2x, us_status = get_raw_target_2x(data["US"]["score"], data["US"]["z_20w"])
+# 直接採用與 Trend Chart 同一套周線步進序列的最新一週數值，確保完全連動
+tw_prev_2x = data["TW"]["prev_t2x"]
+tw_step_2x = data["TW"]["prev_t2x"] if data["TW"].get("is_locked") else data["TW"]["t2x"]
+tw_ideal_2x = data["TW"]["raw_t2x"]
 
-tw_pool_tot = max(1.0, tw_v1 + tw_v2)
-tw_cur_2x_ratio = (tw_v2 / tw_pool_tot) if (tw_v1 + tw_v2) > 0 else 0.0
-tw_step_2x = tw_cur_2x_ratio if data["TW"].get("is_locked") else step_toward(tw_cur_2x_ratio, tw_ideal_2x, MAX_STEP_2X)
-
-tw_c2_in = tw_cur_2x_ratio * 100.0
+tw_c2_in = tw_prev_2x * 100.0
 tw_c1_in = 100.0 - tw_c2_in
 tw_t2_in = tw_step_2x * 100.0
 tw_t1_in = 100.0 - tw_t2_in
 
-us_pool_tot = max(1.0, us_v1 + us_v2)
-us_cur_2x_ratio = (us_v2 / us_pool_tot) if (us_v1 + us_v2) > 0 else 0.0
-us_step_2x = step_toward(us_cur_2x_ratio, us_ideal_2x, MAX_STEP_2X)
+us_prev_2x = data["US"]["prev_t2x"]
+us_step_2x = data["US"]["t2x"]
+us_ideal_2x = data["US"]["raw_t2x"]
 
-us_c2_in = us_cur_2x_ratio * 100.0
+us_c2_in = us_prev_2x * 100.0
 us_c1_in = 100.0 - us_c2_in
 us_t2_in = us_step_2x * 100.0
 us_t1_in = 100.0 - us_t2_in
@@ -639,9 +626,9 @@ cards = [
         "z2_lbl": "月/台", "z2_val": data["TW"]["z_20m"], "z2_unit": "σ",
         "color": "#FACC15" if data["TW"].get("is_locked") else ("#34D399" if abs(tw_cur_pct - tw_sug_pct) <= 10 else "#FBBF24"),
         "mix": mix_visual_html(
-            "池內 原型 vs. 正二",
+            "池內 原型 vs. 正二 (同步 Trend Chart)",
             tw_c1_in, tw_c2_in, tw_t1_in, tw_t2_in,
-            f"本週步進：{tw_c2_in:.1f}% → <b>{tw_t2_in:.1f}%</b>（終極理想 {tw_ideal_2x*100:.0f}%）"
+            f"步進路徑：{tw_c2_in:.0f}% → <b>{tw_t2_in:.0f}%</b>（終極理想 {tw_ideal_2x*100:.0f}%）"
         )
     },
     {
@@ -652,9 +639,9 @@ cards = [
         "z2_lbl": "月/美", "z2_val": data["US"]["z_20m"], "z2_unit": "σ",
         "color": "#38BDF8" if data["US"].get("split_detected") else "#34D399",
         "mix": mix_visual_html(
-            "池內 原型 vs. 正二",
+            "池內 原型 vs. 正二 (同步 Trend Chart)",
             us_c1_in, us_c2_in, us_t1_in, us_t2_in,
-            f"本週步進：{us_c2_in:.1f}% → <b>{us_t2_in:.1f}%</b>（終極理想 {us_ideal_2x*100:.0f}%）"
+            f"步進路徑：{us_c2_in:.0f}% → <b>{us_t2_in:.0f}%</b>（終極理想 {us_ideal_2x*100:.0f}%）"
         )
     },
     {
@@ -729,10 +716,10 @@ if plan_a_mode == "HARVEST_TO_865B":
 elif plan_a_mode == "DIP_BUY_2X":
     triggered_reasons.append(f"低檔積分訊號(S≤-1.0)：賣 {plan_a_step_ratio*100:.1f}% 00865B 買 00685L/00670L 正二")
 
-if not data["TW"].get("is_locked") and abs(tw_cur_2x_ratio - tw_ideal_2x) > 0.01 and (tw_v1 + tw_v2) > 0:
-    triggered_reasons.append(f"台股池內正二步進調整（單次上限 ±10%）")
-if abs(us_cur_2x_ratio - us_ideal_2x) > 0.01 and (us_v1 + us_v2) > 0:
-    triggered_reasons.append(f"美股池內正二步進調整（單次上限 ±10%）")
+if not data["TW"].get("is_locked") and abs(tw_prev_2x - tw_step_2x) > 1e-6:
+    triggered_reasons.append(f"台股池步進 {tw_prev_2x*100:.0f}%→{tw_step_2x*100:.0f}%")
+if abs(us_prev_2x - us_step_2x) > 1e-6:
+    triggered_reasons.append(f"美股池步進 {us_prev_2x*100:.0f}%→{us_step_2x*100:.0f}%")
 
 if triggered_reasons:
     status_banner = (
@@ -791,27 +778,25 @@ with st.expander("📋 查看方案 A 本週精確買賣股數建議", expanded=
     else:
         st.success(f"✅ **【00865B 短債緩衝池】**：目前占總資產 **{bond_cur_pct:.1f}%**（上限 20%），本週未觸發 S ≥ +2.0 收割或 S ≤ -1.0 賣債買正二。")
 
-    def _pool_action(name, s1, p1, v1, s2, p2, v2, step_2x, ideal_2x, locked=False):
+    def _pool_action(name, s1, p1, v1, s2, p2, v2, prev_2x, step_2x, ideal_2x, locked=False):
         if locked:
             st.warning(f"⚠️ **{name}（資料異常鎖定中）**：偵測到單日跳空大於 15%，為避免分割／除權息還原未同步誤判，暫停自動換股建議。")
             return
         ptot = v1 + v2
-        cur2 = (v2 / ptot) if ptot > 0 else 0.0
-        gap = abs(cur2 - ideal_2x)
-        if gap > 0.01 and ptot > 0:
+        if abs(prev_2x - step_2x) > 1e-6 and ptot > 0:
             ds1 = int((ptot * (1 - step_2x) - v1) // p1)
             ds2 = int((ptot * step_2x - v2) // p2)
             a1 = f"買進 {ds1:,} 股" if ds1 >= 0 else f"賣出 {abs(ds1):,} 股"
             a2 = f"買進 {ds2:,} 股" if ds2 >= 0 else f"賣出 {abs(ds2):,} 股"
             st.warning(
-                f"🔔 **{name}**（現況正二 {cur2*100:.1f}% → 本週步進目標 **{step_2x*100:.1f}%**，終極理想 {ideal_2x*100:.0f}%）：\n"
-                f"- 原型 {a1} ｜ 正二 {a2}"
+                f"🔔 **{name}**（Trend Chart 步進 **{prev_2x*100:.0f}% → {step_2x*100:.0f}%**，終極理想 {ideal_2x*100:.0f}%）：\n"
+                f"- 往目標庫存調整：原型 {a1} ｜ 正二 {a2}"
             )
         else:
-            st.success(f"✅ **{name}（已貼合目標 {ideal_2x*100:.0f}%）**：維持現狀不需換股")
+            st.success(f"✅ **{name}（步進維持 {step_2x*100:.0f}%，終極理想 {ideal_2x*100:.0f}%）**：維持現狀不需換股")
 
-    _pool_action("台股核心池 (0050/00685L)", s_0050, tw_p1, tw_v1, s_685l, tw_p2, tw_v2, tw_step_2x, tw_ideal_2x, locked=data["TW"].get("is_locked", False))
-    _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670l, us_p2, us_v2, us_step_2x, us_ideal_2x, locked=False)
+    _pool_action("台股核心池 (0050/00685L)", s_0050, tw_p1, tw_v1, s_685l, tw_p2, tw_v2, tw_prev_2x, tw_step_2x, tw_ideal_2x, locked=data["TW"].get("is_locked", False))
+    _pool_action("美股核心池 (00662/00670L)", s_662, us_p1, us_v1, s_670l, us_p2, us_v2, us_prev_2x, us_step_2x, us_ideal_2x, locked=False)
 
 # ================= 四張每週資產變化圖（含 1.總資產 1年日波動 5σ 與 6σ 質押提醒點位） =================
 with st.expander("📊 過去十年每週資產變化四張圖（含過去一年日波動 5σ／6σ 質押提醒）", expanded=True):
